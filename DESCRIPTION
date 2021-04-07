@@ -1,15 +1,13 @@
 Package: epitsa
-Title: What the Package Does (One Line, Title Case)
+Title: The {epitsa} package aims to simplify time series analysis and forecasting using MSF OCA routine health facility data.
 Version: 0.0.0.9000
 Authors@R: 
-    person(given = "First",
-           family = "Last",
-           role = c("aut", "cre"),
-           email = "first.last@example.com",
-           comment = c(ORCID = "YOUR-ORCID-ID"))
-Description: What the package does (one paragraph).
-License: `use_mit_license()`, `use_gpl3_license()` or friends to
-    pick a license
+    person(given = "Alex",
+           family = "Spina",
+           role = c("aut", "cre"), 
+           email = "alexfspina@gmail.com")
+Description: There are functions for merging old HIS excel data and new DHIS2 data (currently only for IPD, but there is capacity to add in OPD, maternal and child health, etc.). There are templates for producing reports looking at surveillance (outbreak detection) and impact (segmented regression)
+License: GPL-3
 Encoding: UTF-8
 LazyData: true
 Roxygen: list(markdown = TRUE)
