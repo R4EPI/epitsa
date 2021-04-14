@@ -1,0 +1,4 @@
+name: TSA multi project template
+description: >
+  An automated report template for time series analysis
+create_dir: false

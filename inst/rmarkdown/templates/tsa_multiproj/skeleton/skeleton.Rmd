@@ -1,0 +1,3429 @@
+---
+title: "MSF OCA supported facilities data analysis to assess the impact of COVID-19" 
+bibliography: ["references.bib"]
+csl: "vancouver.csl"
+output: 
+  officedown::rdocx_document: 
+    reference_docx: template.docx
+    keep_md: true
+---
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// introduction to this template \\\
+--------------------------------------------------------------------------------
+
+This template can be used to produce a report from excel based HIS tools and DHIS2
+data to produce time series analysis. 
+
+- It is setup to run for one country at a time (knit_reports.R can be used to loop
+over multiple countries)
+- It is broken down by OPD (currently commented out) and IPD data. 
+- It is organised in to a descriptive section to evaluate data quality, then a 
+time series analysis section for projects with appropriate data. 
+- Time series analysis is broken down by surveillance and impact
+- Text within <! > will not show in your final document. These comments are used
+to explain the template. You can delete them if you want.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// setup \\\
+--------------------------------------------------------------------------------
+
+Several packages are required for different aspects of  analysis with *R*. 
+You will need to install these before starting. 
+
+These packages can be quite large and may take a while to download in the
+field. If you have access to a USB key with these packages, it makes sense to
+copy and paste the packages into your computer's R package library 
+(run the command .libPaths() to see the folder path). 
+
+For help installing packages, please visit https://r4epis.netlify.com/welcome
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+
+```{r setup, include=FALSE, results='hide', message=FALSE, warning=FALSE}
+
+## hide all code chunks in the output, but show errors
+knitr::opts_chunk$set(echo = FALSE,      # hide all code chunks in output
+                      error = TRUE,      # show errors if they appear, but don't stop
+                      warning = FALSE,   # hide all warnings
+                      message = FALSE,   # hide all messages
+                      fig.width = 16*0.39,  # Figure width for plots (cm to inch conv)
+                      fig.height = 20*0.39,  # Figure height for plots (cm to inch conv)
+                      tab.cap.style = "Table Caption", 
+                      tab.cap.pre = "Table ", 
+                      tab.cap.sep = ": "
+                      )
+
+
+## Installing required packages for this template
+required_packages <- c("here",        # find your files
+                       "stringr",     # clean text
+                       "aweek",       # define epi weeks  
+                       "epitrix",     # epi helpers and tricks
+                       "MASS",        # for negative binomial regression (has to be loaded before dplyr)
+                       "dplyr",       # clean/shape data
+                       "tidyr",       # clean/shape data
+                       "rio",         # read in data
+                       "ggplot2",     # create plots and charts
+                       "tsibble",     # for time series plotting 
+                       "slider",      # for moving averages
+                       "feasts",      # for time series stats
+                       "fable",       # for time series forecasting
+                       "imputeTS",    # for filling in missing values
+                       "knitr",       # for making clean tables
+                       "flextable",   # for making clean tables
+                       # "citr",        # for adding references with zotero
+                       "yardstick",   # for model forecast performance estimates
+                       "surveillance", # for aberration methods 
+                       "officer",     # for formatting word output
+                       "officedown" # for formatting word output
+                       )
+                       
+for (pkg in required_packages) {
+  # install packages if not already present
+  if (!pkg %in% rownames(installed.packages())) {
+    install.packages(pkg)
+  }
+  
+  # load packages to this current session 
+  library(pkg, character.only = TRUE)
+}
+
+## read the script defining functions for pulling old HIS data
+source(here::here("Functions", "old_his_data_tools.R"))
+
+## read the script defining functions for recoding old HIS data
+source(here::here("Functions", "recode_old_his_data_tools.R"))
+
+## read the script defining functions for pulling bed counts (from his & DHIS2)
+source(here::here("Functions", "his_bed_tools.R"))
+
+## read the script defining functions for reading in datasets
+source(here::here("Functions", "read_msf_data.R")) 
+
+## read the script defining functions for tsa periodograms and fourier terms
+source(here::here("Functions", "tsa_utilities.R")) 
+
+```
+
+
+```{r country_specific}
+## specific country
+#z <- "Pakistan"
+```
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// control_chunk \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to define several control structures. These define what 
+analyses are run and what is shown in the output document. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r control_chunk}
+
+## Whether or not should be based on date of admission (if not then date of exit)
+admissions_based <- FALSE
+
+## whether or not to show detailed outputs (data quality and descriptive analysis)
+show_details <- FALSE
+
+## Whether or not want to run the time series analysis
+include_tsa <- TRUE
+
+## whether want to include aberration methods (only relevant for TSA)
+include_aberration <- FALSE
+
+## define which wards are included by country 
+## "Medical" is excluding ITFC + maternity in IPD ("Medical extension" includes)
+medical_wards <- if_else(z %in% c("Bangladesh", "South Sudan", "Nigeria", 
+                                  "Afghanistan", "DRC North Kivu"), 
+                         "Medical", 
+                         "Medical extension")
+```
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// date_levels \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to define the start and end for the period of interest. 
+It returns all the weeks in the period, in date and week format, separately. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r date_levels}
+
+## define dates want to plot 
+
+## the first date interested in
+# start_date <- week2date("2014-W01") ## using aweek
+start_date <- yearweek("2014 W01")    ## using tsibble 
+
+
+## the last date interested in
+# end_date <- as.Date("2020-12-31") ## using aweek
+end_date <- yearweek("2020-12-31")  ## using tsibble 
+
+
+## the surveillance cut off date (i.e. the end of baseline period)
+surveillance_date <- yearweek("2020-01-01")
+
+## get a vector of all the dates in between 
+all_dates <- as.Date(start_date:end_date, origin = "1970-01-01") ## using base
+
+
+## pull the unique weeks which occur 
+# all_weeks <- levels(date2week(all_dates, floor_day = TRUE, factor = TRUE)) # using aweek
+all_weeks <- seq(start_date, end_date, by = 1) %>% factor()                  # using tsibble
+
+## change weeks to dates 
+# all_epiweeks <- week2date(all_weeks)                          ## using aweek
+all_epiweeks <-  as.Date(seq(start_date, end_date, by = 1))     ## using tsibble
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// country_folders \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to define the path to the folder for the country currently 
+being run. 
+Z is defined in knit_reports.R and must much the name of the respective
+country folder. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r country_folders}
+## specific country
+
+
+## define the filepath
+file_path <- here::here("Data", "Processed", z)
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// ggplot_theme \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to define the theme that will be used for plots. 
+This includes basic visuals but also the limits and labelling of axes.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r ggplot_theme}
+
+## define breaks as weeks 
+date_breaks <- seq(as.Date(start_date),
+                   max(all_epiweeks), 
+                   by = "6 months") 
+
+
+## define ggplot themes
+tsa_axes <- 
+   ## set the x-axis limits based on weeks of interest, only label every january
+  scale_x_date(breaks = date_breaks, 
+               date_labels = "%Y %b", 
+              limits = c(
+                first(all_epiweeks), 
+                last(all_epiweeks)
+                ))
+
+tsa_theme <- 
+  ## give classic black/white axes for plots and set text size
+  theme_classic() +
+  theme(
+    ## set the size for text 
+    text = element_text(size = 15), 
+    ## colour and size the grid lines in the plot 
+    panel.grid.major = element_line(colour = "grey90"), 
+    panel.grid.minor = element_line(colour = "grey90", size = 0.5), 
+    ## add space between faceted plots (axis labels run in to eachother)
+    panel.spacing = unit(1, "lines"), 
+    ## rotate x axis labels
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+    ## put legend below plot 
+    legend.position = "bottom", 
+    legend.direction = "horizontal"
+    )
+
+
+## define appropriate label for the x-axis
+week_lable <- if_else(admissions_based,
+                      "Calendar week of admission",
+                      "Calendar week of discharge")
+
+
+## define appropriate label for use in figure captions 
+caption_lable <- if_else(admissions_based,
+                      "Admissions",
+                      "Discharges")
+
+## define appropriate label for some y-axes
+unit_lable <- str_c(caption_lable," (n)")
+
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// read_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk is reads data from IPD.  
+The function does some initial reformatting and cleaning 
+(more is in the cleaning_ipd chunk below). 
+Rows missing admission (or exit) and duplicates are removed. 
+Duplicates are based on: 
+"calendar_week", "project", "case_number", "age_years", "sex", "diagnosis_at_exit_primary"
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r read_ipd}
+
+## set the data source depending on the country 
+data_source <- if_else(z %in% c("CAR", "India"), "HIS", "Both")
+
+## pull ipd data
+clean_data <- read_msf_data(file_path, site = "IPD",
+                            data_source = data_source, 
+                            ## dont use DHIS team's chronic disease definitions
+                            chronic_defs = FALSE)
+
+## set admission dates and exit dates which more than 1 year before start year to NA
+clean_data$date_of_admission[which(clean_data$date_of_admission < min(all_dates) - 365)] <- NA
+clean_data$date_of_exit[which(clean_data$date_of_exit < min(all_dates) - 365)] <- NA
+
+## set admission and exit dates in the future to NA (i.e. after current date)
+clean_data$date_of_admission[which(clean_data$date_of_admission > Sys.Date())] <- NA
+clean_data$date_of_exit[which(clean_data$date_of_exit > Sys.Date())] <- NA
+
+
+## drop appropriate missings depending on whether doing by admission or exit
+if (admissions_based) {
+  ## drop those with missing date of admission 
+  clean_data <- filter(clean_data, !is.na(date_of_admission))
+  ## also need to drop missing exit for admissions based?
+} else {
+  ## drop those with missing date of exit 
+  clean_data <- filter(clean_data, !is.na(date_of_exit))
+}
+
+## drop duplicates
+## duplicate based on: 
+## "calendar_week", "project", "case_number", "age_years", "sex", "diagnosis_at_exit_primary"
+clean_data <- filter(clean_data, !duplicate_row)
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// clean_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to categorise diagnoses in to groups usable for this TSA 
+template. 
+It is also used to create 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r clean_ipd}
+
+## create a categorical variable for diseases of interest 
+
+## using linelist data 
+clean_data <- clean_data %>% 
+  ## rename diseases as appropriate 
+  ## set all those not interested in to be other 
+  mutate(disease = case_when(
+    ## URTI was only introduced in DHIS2 - so do not use for TSA
+    
+    # diagnosis_at_exit_primary %in% c("Lower respiratory tract infection",
+    #                                  "Upper respiratory tract infection") ~ "ARI",
+    # diagnosis_at_exit_primary == "Upper respiratory tract infection"  ~ "URTI",
+    
+    diagnosis_at_exit_primary == "Lower respiratory tract infection"  ~ "LRTI",
+    diagnosis_at_exit_primary %in% c("Diarrhoea, acute watery",                              
+                                  "Diarrhoea, bloody")                ~ "Diarrhoea", 
+    diagnosis_at_exit_primary == "Malaria"                            ~ "Malaria", 
+    diagnosis_at_exit_primary == "Tuberculosis, pulmonary"            ~ "TB", 
+    
+    ## HIV removed because collected in different tools (e.g. fuchia etc)
+    # diagnosis_at_exit_primary == "HIV and HIV-related illnesses"      ~ "HIV related", 
+    
+    ## chronic diseases removed because different definitions between HIS/DHIS2 
+    # diagnosis_at_exit_primary %in% c("Chronic diseases", 
+    #                                 "Acute hypertensive crisis", 
+    #                                 "Acute cardiac events", 
+    #                                 "Acute complications of diabetes", 
+    #                                 "Chronic cardio & cerebrovascular disease", 
+    #                                 "Chronic complications of diabetes", 
+    #                                 "Non-infectious respiratory diseases - chronic", 
+    #                                 "Non-infectious respiratory disease - acute exacerbation", 
+    #                                 "Epilepsy")                        ~ "Chronic diseases", 
+    
+    
+    TRUE                                                              ~ "Other"
+    ))
+
+
+## create an age group variable by specifying categorical breaks
+clean_data$age_group <- sitrep::age_categories(clean_data$age_years, 
+                                             breakers = c(0, 3, 15, 30, 45)) %>% 
+  ## change NAs to "missing"
+  forcats::fct_explicit_na("Missing")
+
+
+## remove extra words from project names
+clean_data$project <- str_remove(clean_data$project, 
+                                 " Secondary Healthcare| Secondary Health care| Primary Healthcare| Primary healthcare| South Sudan Refugees| Healthcare")
+
+
+## define unique projects (for looping over later) 
+projects <- unique(clean_data$project)
+
+## drop inpatient and maternity where appropriate 
+if (medical_wards == "Medical") {
+  clean_data <- clean_data %>% 
+    filter(!admission_ward %in% c("Inpatient TFC", "Maternity ward"))
+}
+
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// read_ipd_beds \\\
+--------------------------------------------------------------------------------
+
+This chunk is reads bed count data from IPD.  
+The function does some initial reformatting and cleaning. 
+Weeks with missing counts are dropped. 
+Duplicates are based on: "week"
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r read_ipd_beds}
+
+## pull ipd data
+bed_counts <- read_msf_data(file_path, site = "IPD Beds", 
+                            ## pull from the appropriate data_source (HIS or DHIS2)
+                            data_source = data_source, 
+                            ## Only count beds from appropriate wards
+                            wards = medical_wards)
+
+## remove extra words from project names
+bed_counts$project <- str_remove(bed_counts$project, 
+                                 " Secondary Healthcare| Secondary Health care| Primary Healthcare| Primary healthcare| South Sudan Refugees| Healthcare")
+
+## find duplicates and only keep the higher bed count
+bed_counts <- bed_counts %>% 
+  group_by(country, project, report_year, week, month) %>% 
+  mutate(
+    ## get the number of times duplicate occurs
+    num_dupes = n(),
+    duped = if_else(num_dupes > 1 , TRUE, FALSE)
+  ) %>% 
+  arrange(-beds) %>% 
+  slice(1) %>%
+  ungroup()
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// timelines \\\
+--------------------------------------------------------------------------------
+
+This chunk is reads in data with contextual information by project. 
+This includes changes to programming (such as closures or DHIS2 introduction) as
+well as the date of first Covid-19 introduction (at project, region and country 
+level). 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r timelines}
+
+## pull timelines data
+timelines <- rio::import(here::here("Data", "timelines.xlsx"), 
+                         which = "msf_info") %>% 
+  ## filter to only keep country currently being run
+  filter(country == z & project %in% projects)
+
+## make sure dates 
+timelines$date_event <- as.Date(timelines$date_event, origin = "1899-12-30")
+
+## make in to an epiweek 
+timelines$calendar_week <- yearweek(timelines$date_event)
+
+```
+
+
+
+This report is based on data management and data analysis scripts written by Alexander
+Spina. If you have questions, please reach out to your epidemiology advisor. 
+The report uses data available for projects (`r str_c(projects, collapse = ", ")`) 
+in `r str_replace(z, "_", " ")` from old Excel based HIS tools as well as DHIS2 
+databases as of `r format(Sys.Date(), format = "%d %B %Y")`.  
+For a breakdown of the time period covered by different data sources see the 
+appendix. 
+
+
+## Objectives
+- To monitor morbidity and mortality indicators of selected MSF OCA projects between
+2014 and 2020
+- To document any changes in these that might be attributed to the Covid-19 outbreak 
+in 2020
+
+For more details see the [concept note](https://tinyurl.com/yygxkhqw).
+
+
+## Report structure
+This report is structured by data from outpatient departments (OPD) and inpatient 
+departments (IPD). [Note: OPD will be added in a later draft]
+
+There are initial descriptive sections, for both OPD and IPD, to evaluate data
+quality and availability. 
+
+Then there is a section on time series analysis which uses only the most suitable
+data available. There are two sections in time series analysis; one which is for 
+surveillance (looking at excess in cases of diseases or death by week) and 
+an impact section using segmented regression to look at whether COVID-19 had an 
+effect on services utilisation. 
+
+## Context 
+
+The first case of confirmed Covid-19 in the country was in
+`r filter(timelines, event == "Covid country") %>% summarise(min(calendar_week)) %>%  pull()`
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// covid_dates \\\
+--------------------------------------------------------------------------------
+
+This chunk lists out relevant dates that covid arrived in the country, the region
+and the project. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r covid_dates}
+
+## use dataset of events by date
+## save as object for later use
+intervention_weeks <- timelines %>% 
+  ## only keep the dates for covid cases
+  filter(event %in% c("Covid suspect", "Covid confirmed", "Covid region")) %>% 
+  ## only keep relevant columns 
+  select(project, calendar_week, event) %>% 
+  ## spread dataset in to wide format by project (event becomes columns)
+  pivot_wider(id_cols = project, names_from = event, values_from = calendar_week)
+
+
+## create table for output documents
+## rename columns appropriately 
+intervention_weeks %>% 
+  select( Project = project, 
+         "Suspected (MSF linelist)" = "Covid suspect", 
+         "Confirmed (MSF linelist)" = "Covid confirmed", 
+         "Confirmed (region)" = "Covid region") %>% 
+  ## show as a formatted table in the output
+  flextable() %>% 
+  autofit() %>% 
+  set_caption("Calendar week of Covid-19 case reports at MSF facilities and in the region, by project")
+
+## only keep regional date for use in segmented regression 
+intervention_weeks <- intervention_weeks %>% 
+  select(project, 
+         confirmed_region = "Covid region")
+
+```
+
+\newpage
+
+## Main findings 
+
+(Epi-advisor to comment on most relevant results here)
+
+\newpage
+
+<!-- # Outpatient Departments (OPD) descriptive analysis -->
+
+<!-- This section looks at availability and quality data from outpatient departments -->
+<!-- for each project.  -->
+
+
+<!-- <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+<!-- /// read_clean_opd \\\ -->
+<!-- -------------------------------------------------------------------------------- -->
+
+<!-- This chunk is reads and cleans data from OPD.  -->
+<!-- Duplicates are removed as well as data from health points and mobile clinics.  -->
+<!-- Duplicates are based on:  -->
+<!-- "calendar_week", "project", "site", "disease", and counts -->
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ --> 
+
+<!-- ```{r read_clean_opd} -->
+
+<!-- ## pull opd data -->
+<!-- clean_data <- read_msf_data(file_path, site = "OPD") -->
+
+<!-- ## deal with duplicates -->
+
+<!-- ## drop duplicate rows with same counts -->
+<!-- ## duplicate based on "calendar_week", "project", "site", "disease", and counts -->
+<!-- clean_data <- filter(clean_data, !duplicate_row) -->
+
+<!-- ## create a composite ID for summing after -->
+<!-- clean_data$comp_id <- str_glue_data(clean_data, "{project}_{site}_{calendar_week}_{disease}") -->
+
+<!-- ## get a list of IDs that have duplicates with different counts -->
+<!-- duplicate_ids <- clean_data$comp_id[clean_data$duplicate_site] -->
+
+<!-- ## sum relevant rows [nb this will turn complete missings in to 0s]  -->
+<!-- for (i in duplicate_ids) { -->
+<!--   clean_data[which(clean_data$comp_id == i & !clean_data$duplicate_site),  -->
+<!--              c("pop1_u5", "pop1_o5", -->
+<!--                "pop2_u5", "pop2_o5", "total")] <- colSums(clean_data[ -->
+<!--                  which(clean_data$comp_id == i),  -->
+<!--                  c("pop1_u5", "pop1_o5", -->
+<!--                    "pop2_u5", "pop2_o5", "total")]) -->
+<!-- } -->
+
+<!-- ## drop duplicate rows with different counts (only keeping the summed row)  -->
+<!-- clean_data <- filter(clean_data, !duplicate_site) -->
+
+<!-- ## drop health posts and mobile clinics  -->
+<!-- clean_data <- clean_data %>%  -->
+<!--   filter(!str_detect(site, pattern = "HP_|MC_")) -->
+
+
+<!-- ``` -->
+
+
+<!-- <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+<!-- /// admission_tile_counts_opd \\\ -->
+<!-- -------------------------------------------------------------------------------- -->
+
+<!-- This chunk pulls together counts of diseases and deaths by week.  -->
+<!-- Diseases are based on admission week and deaths are based on exit week.  -->
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ --> 
+
+<!-- ```{r admission_tile_counts_opd} -->
+
+<!-- ## get counts of total admissions by week  -->
+<!-- total_admissions <- clean_data %>%  -->
+<!--   ## only keep the new disease presentations -->
+<!--   filter(count_type == "Diseases") %>%  -->
+<!--   ## group by site and week -->
+<!--   group_by(project, site, calendar_week, epiweek) %>%  -->
+<!--   ## get total number of admissions  -->
+<!--   summarise(total = sum(total, na.rm = TRUE),  -->
+<!--             disease = "Total admissions") %>%  -->
+<!--   ## pull the columns of interest  -->
+<!--   select(project, site, disease, calendar_week, epiweek, total) -->
+
+
+<!-- ## get counts of individual diseases -->
+<!-- tile_counts <- clean_data %>%  -->
+<!--   ## only keep specific diseases  -->
+<!--   filter(disease %in% c("Acute lower respiratory tract infection",  -->
+<!--                         "Acute upper respiratory tract infection",  -->
+<!--                         "Deaths in OPD")) %>%  -->
+<!--   ## pull the columns of interest (weekly counts are in total already) -->
+<!--   select(project, site, disease, calendar_week, epiweek, total)  -->
+
+
+<!-- ## combine overall and disease specific admission counts by row  -->
+<!-- tile_counts <- bind_rows(tile_counts, total_admissions) %>%  -->
+<!--   ## create a categorical variable about whether data and counts available or not -->
+<!--   mutate(categories = case_when( -->
+<!--     is.na(total) ~ NA_character_,  -->
+<!--     total == 0   ~ "Zero count",  -->
+<!--     total > 0    ~ "Counts available")) -->
+
+<!-- ``` -->
+
+
+
+
+<!-- <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+<!-- /// tile_plot_opd \\\ -->
+<!-- -------------------------------------------------------------------------------- -->
+
+<!-- This chunk uses the tile_counts data to produce a tile plot by week to visualise -->
+<!-- data availability.  -->
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ --> 
+<!-- **Figure**: Data availability by project site and week for OPD -->
+<!-- ```{r tile_plot_opd} -->
+
+<!-- ## using tile_counts, plot counts by week and colour by category  -->
+<!-- ggplot(tile_counts, aes(x = epiweek, y = disease, fill = categories)) +  -->
+<!--   ## plot as tiles with a thin white border -->
+<!--   geom_tile(colour = "white", size = 0.25) +  -->
+<!--   ## plot for each site individually  -->
+<!--   facet_grid(project + site ~ . ) +  -->
+<!--   ## choose colours and set the category names for legend   -->
+<!--   scale_fill_manual(values = c("#009E73", "#E69F00"), na.value = "Grey90",  -->
+<!--                     labels = c("Counts (>0)", "Zero count", "Missing")) +  -->
+<!--   ## set axes titles appropriately -->
+<!--   labs(x = "Calendar week", y = element_blank()) +  -->
+<!--   ## add in theme and axis labels  -->
+<!--   tsa_axes +  -->
+<!--   tsa_theme -->
+
+<!-- ``` -->
+
+
+<!-- <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+<!-- /// completeness_table_opd \\\ -->
+<!-- -------------------------------------------------------------------------------- -->
+
+<!-- This chunk uses the tile_counts data to produce a table on what percentage of  -->
+<!-- expected weeks have data available. This is only for baseline data up to 2018.  -->
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ --> 
+<!-- **Table:** Completness of data by project site and indicator for OPD -->
+<!-- ```{r completeness_table_opd, } -->
+
+<!-- ## using tile_counts -->
+<!-- tile_counts %>%  -->
+<!--   ## only keep weeks before 2019 -->
+<!--   filter(epiweek %in% all_epiweeks[all_epiweeks < as.Date("2020-01-01")]) %>%  -->
+<!--   ## calculate by site and disease  -->
+<!--   group_by(project, site, disease) %>%  -->
+<!--   ## get the number of weeks with non missing counts and divide by expected total -->
+<!--   summarise(complete_n = sum(!is.na(total)),  -->
+<!--             completeness = round(complete_n /  -->
+<!--               sum(all_epiweeks < as.Date("2019-01-01")) * 100,  -->
+<!--                   digits = 1)) %>%  -->
+<!--   ## change column names appropriately  -->
+<!--   rename("Project" = project,  -->
+<!--          "Disease" = disease,  -->
+<!--          "Weeks with data (n)" = complete_n,  -->
+<!--          "Completeness(%)" = completeness) %>%  -->
+<!--   ## print as a nice table  -->
+<!--   kable() -->
+
+<!-- ``` -->
+
+
+<!-- <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+<!-- /// weekly_plots_opd \\\ -->
+<!-- -------------------------------------------------------------------------------- -->
+
+<!-- This chunk uses will plot cases over time (in weeks) for specific diseases -->
+<!-- of interest.  -->
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ --> 
+<!-- **Figure**: Cases of indicators by site and week for OPD -->
+<!-- ```{r weekly_plots_opd} -->
+
+<!-- ## run for each of the defined diseases of interest  -->
+<!-- for (i in c("Acute lower respiratory tract infection",  -->
+<!--             "Acute upper respiratory tract infection",  -->
+<!--             "Deaths in OPD")) { -->
+
+<!--   ## have to call print to show plot within the for-loop -->
+<!--   print( -->
+
+<!--     ## filter clean_data to only use disease of interest  -->
+<!--     ## plot counts by week  -->
+<!--     ggplot(filter(clean_data, disease == i),  -->
+<!--        aes(x = epiweek, y = total)) +  -->
+<!--       ## plot as a line chart  -->
+<!--       ## identity specifies to use the counts as are -->
+<!--       geom_line(stat = "identity") +  -->
+<!--       ## plot for each site individually  -->
+<!--       facet_grid(project + site ~ . ) +  -->
+<!--       ## add a title to the plot with disease name  -->
+<!--       labs(title = i, x = "Calendar week", y = "Cases (n)") +  -->
+<!--       ## make y and x axes meet at the origin (x = 0, y = 0) -->
+<!--       scale_y_continuous(expand = c(0,0), limits = c(0, NA)) +  -->
+<!--       ## add in theme and axis labels  -->
+<!--       tsa_axes +  -->
+<!--       tsa_theme -->
+
+<!--   ) -->
+<!-- } -->
+
+<!-- ``` -->
+
+# Inpatient Departments (IPD) descriptive analysis
+
+This section looks at availability and quality of data from inpatient departments
+for each project. 
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// counts_data_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to create eight tables - all done by week and project. 
+(week is either admission or discharge week - depending what admissions_based
+is set to). 
+It creates patient counts (admissions or discharges), by age group and overall. 
+Then disease case counts, by age group and overall. 
+Then overall death counts, by age group and overall. 
+Finally, disease specific death counts, by age group and overall. 
+
+The reason to do big tables is that these can then be broken down later in the 
+script, rather than continuously recreating the same base of counts to manipulate. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r counts_data_ipd}
+
+## define how to group (either by admission or exit date)
+age_case_counts <- if (admissions_based) {
+  group_by(clean_data, project, epiweek, age_group)
+} else {
+  group_by(clean_data, project, epiweek_death, age_group)
+}
+
+
+## get patient counts (admissions or discharges) by age group
+age_patient_counts <- age_case_counts %>% 
+  summarise(disease = "Patients",
+            "total"   = n()) %>% 
+  ## remove grouping so can be worked with after
+  ungroup()
+          
+## get counts for diseases by age group
+age_case_counts <- age_case_counts %>% 
+  ## get counts for each disease 
+  count(disease, name = "total") %>% 
+  ## remove grouping so can be worked with after
+  ungroup()
+
+## If grouped by exit date - rename epiweek_death to epiweek
+## this makes all code the same after this point
+if (!admissions_based) {
+  age_patient_counts <- rename(age_patient_counts, 
+                               epiweek = epiweek_death)
+  
+  age_case_counts <- rename(age_case_counts, 
+                               epiweek = epiweek_death)
+}
+
+
+
+## make patient counts tsibble conform - to fill in missings 
+age_patient_counts <- age_patient_counts %>% 
+  ## make epiweek in to tsibble compatible week variable 
+  mutate(epiweek = yearweek(epiweek)) %>% 
+  ## make counts in to tsibble so it recognises weeks as main time var
+  as_tsibble(index = epiweek, key = c(project, disease, age_group)) %>% 
+  ## add in missing weeks with NAs
+  fill_gaps() %>% 
+  ## make back in to a tibble for manupulation 
+  as_tibble()
+
+## make case counts tsibble conform - to fill in missings 
+age_case_counts <- age_case_counts %>% 
+  ## make epiweek in to tsibble compatible week variable 
+  mutate(epiweek = yearweek(epiweek)) %>% 
+  ## make counts in to tsibble so it recognises weeks as main time var
+  as_tsibble(index = epiweek, key = c(project, disease, age_group)) %>% 
+  ## add in missing weeks with NAs
+  fill_gaps() %>% 
+  ## make back in to a tibble for manupulation 
+  as_tibble()
+
+## get counts for disease overall
+case_counts <- age_case_counts %>% 
+  ## summarise by project week and disease (drop age_group) 
+  group_by(project, epiweek, disease) %>% 
+  summarise(total = sum(total, na.rm = TRUE)) %>% 
+  ## remove grouping so can be worked with after
+  ungroup()
+
+## get patient counts (admissions or discharges) by week
+patient_counts <- age_patient_counts %>% 
+  group_by(project, epiweek) %>% 
+  summarise(disease = "Patients", 
+            "total" = sum(total, na.rm = TRUE)) %>% 
+  ## remove grouping so can be worked with after
+  ungroup()
+
+
+## get the overall death counts by age group
+age_death_counts <- clean_data %>% 
+  group_by(project, epiweek_death, age_group) %>% 
+  summarise(disease = "Deaths", 
+            total = sum(inpatient_exit_status == "Dead", na.rm = TRUE)) %>% 
+  ## rename epiweek_death to epiweek (so can use with other counts)
+  rename(epiweek = epiweek_death) %>% 
+  ## remove grouping so can be worked with after
+  ungroup()
+
+## get the disease specific death counts by age group
+age_disease_death_counts <- clean_data %>% 
+  group_by(project, epiweek_death, age_group, disease) %>% 
+  summarise(deaths = sum(inpatient_exit_status == "Dead", na.rm = TRUE)) %>% 
+  ## rename epiweek_death to epiweek (so can use with other counts)
+  rename(epiweek = epiweek_death) %>% 
+  ## remove grouping so can be worked with after
+  ungroup()
+
+
+## make patient counts tsibble conform - to fill in missings 
+age_death_counts <- age_death_counts %>% 
+  ## make epiweek in to tsibble compatible week variable 
+  mutate(epiweek = yearweek(epiweek)) %>% 
+  ## make counts in to tsibble so it recognises weeks as main time var
+  as_tsibble(index = epiweek, key = c(project, disease, age_group)) %>% 
+  ## add in missing weeks with NAs
+  fill_gaps() %>% 
+  ## make back in to a tibble for manupulation 
+  as_tibble()
+
+## make case counts tsibble conform - to fill in missings 
+age_disease_death_counts <- age_disease_death_counts %>% 
+  ## make epiweek in to tsibble compatible week variable 
+  mutate(epiweek = yearweek(epiweek)) %>% 
+  ## make counts in to tsibble so it recognises weeks as main time var
+  as_tsibble(index = epiweek, key = c(project, disease, age_group)) %>% 
+  ## add in missing weeks with NAs
+  fill_gaps() %>% 
+  ## make back in to a tibble for manupulation 
+  as_tibble()
+
+## get the overall death counts 
+death_counts <- age_death_counts %>% 
+  ## summarise by project and week (drop age_group) 
+  group_by(project, epiweek) %>% 
+  summarise(disease = "Deaths",
+            total = sum(total, na.rm = TRUE)) %>% 
+  ## remove grouping so can be worked with after
+  ungroup()
+
+## get the disease specific death counts
+disease_death_counts <- age_disease_death_counts %>% 
+  ## summarise by project and week and disease (drop age_group) 
+  group_by(project, epiweek, disease) %>%  
+  summarise(deaths = sum(deaths, na.rm = TRUE))
+  
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// tile_counts_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk pulls together counts of diseases and deaths by week. 
+Whether this is based on admissions or discharges depends on counts_data_ipd chunk
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r tile_counts_ipd}
+
+## bind together counts and deaths 
+tile_counts <- bind_rows(patient_counts, case_counts, death_counts)
+
+tile_counts <- tile_counts %>% 
+  ## only keep three diseases of interest
+  filter(disease %in% c("Patients", "LRTI", "Deaths")) %>% 
+  ## create a categorical variable about whether data and counts available or not
+  mutate(categories = case_when(
+    is.na(total) ~ NA_character_, 
+    total == 0   ~ "Zero count", 
+    total > 0    ~ "Counts available"))
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// tile_plot_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk uses the tile_counts data to produce a tile plot by week to visualise
+data availability. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r tile_plot_ipd, eval = show_details, fig.cap = "Data availability by project site and week for IPD"}
+
+## using tile_counts, plot counts by week and colour by category 
+ggplot(filter(tile_counts, !disease %in% c("lrti_rt", "deaths_rt")),
+       aes(x = as.Date(epiweek), y = disease, fill = categories)) + 
+  ## plot as tiles with a thin white border
+  geom_tile(colour = "white", size = 0.25) + 
+  ## plot for each site individually 
+  facet_grid(project ~ . ) + 
+  ## choose colours and set the category names for legend 
+  scale_fill_manual(values = c("#009E73", "#E69F00"), na.value = "Grey90", 
+                    labels = c("Counts (>0)", "Zero count", "Missing")) + 
+  ## add axes titles appropriately
+  labs(x = week_lable, y = element_blank()) + 
+  ## add in theme and axis labels 
+  tsa_axes + 
+  tsa_theme
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// completeness_table_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk uses the tile_counts data to produce a table on what percentage of 
+expected weeks have data available. This is only for baseline data up to 2019. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r completeness_table_ipd, eval = show_details}
+## using tile_counts
+tile_counts %>% 
+  ## dont use the rate measures
+  # filter(!disease %in% c("lrti_rt", "deaths_rt")) %>% 
+  ## only keep weeks before 2020
+  filter(epiweek %in% all_epiweeks[all_epiweeks < as.Date(surveillance_date)]) %>% 
+  ## calculate by site and disease 
+  group_by(project, disease) %>% 
+  ## get the number of weeks with non missing counts and divide by expected total
+  summarise(complete_n = sum(!is.na(total) & total != 0), 
+            completeness = round(complete_n / 
+              sum(all_epiweeks < as.Date(surveillance_date)) * 100, 
+                  digits = 1)) %>% 
+  ## change column names appropriately 
+  rename("Project" = project, 
+         "Disease" = disease, 
+         "Weeks with data (n)" = complete_n, 
+         "Completeness(%)" = completeness) %>% 
+  ## print as a nice table 
+  kable(caption = "Table: Completeness of data by project site and indicator for IPD until end 2019")
+
+```
+  
+  
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// admission_barcounts_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk produces counts of admissions by diseases and week for use in plotting
+as a bar chart. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r admission_barcounts_ipd}
+## using the case counts 
+admission_counts <- case_counts %>% 
+  ## make sure disease appear in the correct order
+  mutate(disease = factor(disease,
+                          levels = c("Other",
+                                     "LRTI",
+                                     "Diarrhoea",
+                                     "Malaria",
+                                     "TB",
+                                     # "HIV related",
+                                     # "Chronic diseases"
+                                     NULL # so can comment out others above
+                                     )))
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// admission_barplot_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk produces a bar chart of admissions by disease and week 
+(using appropriate week defined in the admission_barcounts_ipd chunks). 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r admissions_barplot_ipd, fig.cap = "Discharges by disease and week for IPD"}
+
+## define the height that want to use for text labels
+height <- admission_counts %>% 
+  ## for each project and week 
+  group_by(project, epiweek) %>% 
+  ## find the tallest peak 
+  summarise(height = sum(total)) %>% 
+  ## find the highest peak out of all projects
+  summarise(height = max(height)) %>% 
+  ## take 3/4s of that 
+  summarise(max(height) * 0.75) %>% 
+  ## return the value
+  pull()
+  
+  
+
+
+
+## using admission_counts, plot counts by week and colour by category 
+ggplot() + 
+  ## plot for each site individually 
+  facet_grid(project ~ . ) + 
+  
+  ## plot as a bar chart, colour by disease, use counts as they are
+  geom_bar(data = admission_counts, 
+           aes(x = as.Date(epiweek), y = total,
+               fill = disease, colour = disease), 
+           stat = "identity") + 
+
+  ## add in dhis2 start date line and label
+  geom_vline(data = filter(timelines, event == "Start DHIS2"),
+             aes(xintercept = as.Date(calendar_week)),
+             linetype = 2) +
+
+  geom_label(data = filter(timelines, event == "Start DHIS2"),
+            aes(x = as.Date(calendar_week),
+                y = height,
+                label = event)) +
+  
+  ## choose colours for boxes and outlines
+  scale_fill_manual(values = c("Grey90",
+                               "#72A162", ## green
+                               "#485C6E", ## darkblue
+                               "#9F4D48", ## red 
+                               "#F1B077", ## orange
+                               # "#E2FCFF", ## sky blue 
+                               # "#AAA970",   ## beige 
+                               NULL         ## so can comment others out
+                               )) + 
+  scale_colour_manual(values = c("Grey90",
+                               "#72A162", ## green
+                               "#485C6E", ## darkblue
+                               "#9F4D48", ## red 
+                               "#F1B077", ## orange
+                               # "#E2FCFF", ## sky blue 
+                               # "#AAA970",   ## beige 
+                               NULL         ## so can comment others out
+                               )) + 
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) +
+  ## label the axes appropriately and remove legend titles 
+  labs(x = week_lable, y = unit_lable,
+       colour = element_blank(), fill = element_blank()) + 
+  ## add in theme and axis labels 
+  tsa_axes + 
+  tsa_theme
+```
+  
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// rates_data_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk creates datasets of disease and death rates; by merging datasets 
+from the counts_data_ipd chunk. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r rates_data_ipd}
+
+## join case counts and patient counts
+cases <- left_join(case_counts, 
+                   ## from patient counts only keep project, epiweek and rename 
+                   ## "total" column to "patients" (seperate column on merge)
+                   select(patient_counts, project, epiweek, patients = total) ,
+                   ## combine project and epiweek as unique identifier
+                   by = c("project", "epiweek"))
+
+## make rows where admissions less than 10 NA (otherwise throws off everything)
+cases[which(cases$patients < 10), c("total", "patients")] <- NA
+
+## add in a rate column 
+cases <- cases %>% 
+  mutate(rate = total / patients * 10000)
+
+
+## join deaths and counts 
+## this is in two steps because the denominators are different (overall vs diseases)
+deaths1 <- left_join(death_counts,
+                   ## from patient counts only keep project, epiweek and rename 
+                   ## "total" column to "patients" (seperate column on merge)
+                   select(patient_counts, project, epiweek, patients = total),
+                   ## combine project and epiweek as unique identifier
+                   by = c("project", "epiweek")) %>% 
+  ## change deaths to overall for disease so is labelled clearer
+  mutate(disease = "Overall")
+
+deaths2 <- left_join(disease_death_counts,
+                   ## from case counts only keep project, epiweek and rename 
+                   ## "total" column to "patients" (seperate column on merge)
+                   select(case_counts, project, epiweek, patients = total, disease),
+                   ## combine project and epiweek as unique identifier
+                   by = c("project", "epiweek", "disease")) %>% 
+  rename(total = deaths)
+
+
+## combine overall and disease specific death counts 
+deaths <- bind_rows(deaths1, deaths2)
+
+## make rows where admissions less than 10 NA (otherwise throws off everything)
+## get weeks where patient admissions are low 
+low_count_weeks <- filter(patient_counts, total < 10) %>% 
+  mutate(filler = TRUE, 
+         epiweek = as.Date(epiweek)) %>% 
+  select(project, epiweek, filler) 
+## merge with deaths temporarily to get the weeks to set to empty
+deaths <- left_join(deaths, low_count_weeks, by = c("project", "epiweek"))
+## set patient and totals columns to empty 
+deaths[which(deaths$filler), c("total", "patients")] <- NA
+## drop extra variable
+deaths <- select(deaths, -filler)
+
+## add in a rate column 
+deaths <- deaths %>% 
+  mutate(rate = total / patients * 10000)
+
+## drop the intermediate datasets 
+rm(deaths1, deaths2)
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// age_rates_data_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk creates datasets by age of disease and death rates; by merging datasets 
+from the counts_data_ipd chunk. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r age_rates_data_ipd}
+
+## join case counts and patient counts
+age_cases <- left_join(age_case_counts, 
+                   ## from patient counts only keep project, epiweek and rename 
+                   ## "total" column to "patients" (seperate column on merge)
+                   select(age_patient_counts, project, epiweek, age_group, patients = total),
+                   ## combine project and epiweek as unique identifier
+                   by = c("project", "epiweek", "age_group"))
+
+## make rows where admissions less than 10 NA (otherwise throws off everything)
+age_cases[which(age_cases$patients < 10), c("total", "patients")] <- NA
+
+## add in a rate column 
+age_cases <- age_cases %>% 
+  mutate(rate = total / patients * 10000)
+
+
+## join deaths and counts 
+## this is in two steps because the denominators are different (overall vs diseases)
+deaths1 <- left_join(age_death_counts,
+                   ## from patient counts only keep project, epiweek and rename 
+                   ## "total" column to "patients" (seperate column on merge)
+                   select(age_patient_counts, project, age_group, epiweek, patients = total),
+                   ## combine project and epiweek as unique identifier
+                   by = c("project", "epiweek", "age_group")) %>% 
+  ## change deaths to overall for disease so is labelled clearer
+  mutate(disease = "Overall")
+
+deaths2 <- left_join(age_disease_death_counts,
+                   ## from case counts only keep project, epiweek and rename 
+                   ## "total" column to "patients" (seperate column on merge)
+                   select(age_case_counts, project, epiweek, age_group, patients = total, disease),
+                   ## combine project and epiweek as unique identifier
+                   by = c("project", "epiweek", "disease", "age_group")) %>% 
+  rename(total = deaths)
+
+
+## combine overall and disease specific death counts 
+age_deaths <- bind_rows(deaths1, deaths2)
+
+## make rows where admissions less than 10 NA (otherwise throws off everything)
+## get weeks where patient admissions are low 
+low_count_weeks <- filter(age_patient_counts, total < 10) %>% 
+  mutate(filler = TRUE, 
+         epiweek = as.Date(epiweek)) %>% 
+  select(project, epiweek, age_group, filler) 
+## merge with deaths temporarily to get the weeks to set to empty
+age_deaths <- left_join(age_deaths, low_count_weeks, by = c("project", "epiweek", 
+                                                            "age_group"))
+## set patient and totals columns to empty 
+age_deaths[which(age_deaths$filler), c("total", "patients")] <- NA
+## drop extra variable
+age_deaths <- select(age_deaths, -filler)
+
+## add in a rate column 
+age_deaths <- age_deaths %>% 
+  mutate(rate = total / patients * 10000)
+
+## drop the intermediate datasets 
+rm(deaths1, deaths2)
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// disease_count_plot_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk will plot cases over time (in weeks) for specific diseases
+of interest. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r disease_count_plot_ipd, eval = show_details, fig.cap = "Weekly discharge counts by site and primary diagnosis"}
+## plot counts by week using tile_plots
+ggplot(filter(cases, disease %in% c("Diarrhoea", "LRTI", "Malaria")),  
+       aes(x = as.Date(epiweek), y = total)) + 
+  ## plot as a line chart 
+  ## identity specifies to use the counts as are
+  geom_line(stat = "identity") + 
+  ## plot for each site and disease individually 
+  facet_grid(project + disease ~ .) +  
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  ## add axis titles appropriately
+  labs(x = week_lable, y = "cases (n)") + 
+  ## add in theme and axis labels 
+  tsa_axes + 
+  tsa_theme
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// disease_rate_plot_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk will plot cases per 10,000 admissions (or discharges), 
+over time (in weeks) for specific diseases of interest. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r disease_rate_plot_ipd, fig.cap = "Weekly discharge rates by site and primary diagnosis"}
+## plot counts by week using tile_plots
+ggplot(filter(cases, disease %in% c("Diarrhoea", "LRTI", "Malaria")),  
+       aes(x = as.Date(epiweek), y = rate)) + 
+  ## plot as a line chart 
+  ## identity specifies to use the counts as are
+  geom_line(stat = "identity") + 
+  ## plot for each site and disease individually 
+  facet_grid(project + disease ~ .) +  
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  ## add axis titles appropriately
+  labs(x = week_lable, y = "Rate (cases/10,000 discharges)") + 
+  ## add in theme and axis labels 
+  tsa_axes + 
+  tsa_theme
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// age_disease_rate_plot_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk will plot cases per 10,000 admissions (or discharges), 
+over time (in weeks) for LRTI of interest by age group.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r age_disease_rate_plot_ipd, eval = show_details, fig.cap = "Weekly discharge rates by site, age group and primary diagnosis"}
+## plot counts by week using tile_plots
+ggplot(filter(age_cases, disease %in% c("LRTI")),  
+       aes(x = as.Date(epiweek), y = rate)) + 
+  ## plot as a line chart 
+  ## identity specifies to use the counts as are
+  geom_line(stat = "identity") + 
+  ## plot for each site and disease individually 
+  facet_grid(project + age_group ~ .) +  
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  ## add axis titles appropriately
+  labs(x = week_lable, y = "Rate (cases/10,000 discharges)") + 
+  ## add in theme and axis labels 
+  tsa_axes + 
+  tsa_theme
+
+```
+
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// death_count_plot_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk will plot deaths over time (in weeks), overall and for specific diseases
+of interest. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r death_count_plot_ipd, eval = show_details, fig.cap = "Weekly death counts by site and primary diagnosis"}
+## plot counts by week using tile_plots
+ggplot(filter(deaths, disease %in% c("Overall", "LRTI", "Malaria")), 
+       aes(x = epiweek, y = total)) + 
+  ## plot as a line chart 
+  ## identity specifies to use the counts as are
+  geom_line(stat = "identity") + 
+  ## plot for each site and disease individually 
+  facet_grid(project + disease ~ .) +  
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  ## add axis titles appropriately
+  labs(x = week_lable, y = "cases (n)") + 
+  ## add in theme and axis labels 
+  tsa_axes + 
+  tsa_theme
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// death_rate_plot_ipd \\\
+--------------------------------------------------------------------------------
+
+This chunk will plot deaths per 10,000 admissions (or discharges), 
+over time (in weeks) for specific diseases of interest and overall. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+```{r death_rate_plot_ipd, fig.cap = "Weekly death rates by site and primary diagnosis"}
+## plot counts by week using tile_plots
+ggplot(filter(deaths, disease %in% c("Overall", "LRTI", "Malaria")),  
+       aes(x = epiweek, y = rate)) + 
+  ## plot as a line chart 
+  ## identity specifies to use the counts as are
+  geom_line(stat = "identity") + 
+  ## plot for each site and disease individually 
+  facet_grid(project + disease ~ .) +  
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) + 
+  ## add axis titles appropriately
+  labs(x = week_lable, y = "Mortality (deaths/10,000 discharges)") + 
+  ## add in theme and axis labels 
+  tsa_axes + 
+  tsa_theme
+
+```
+
+
+\newpage
+
+# Timeseries analysis 
+
+This section uses the most appropriate data from project sites to look at 
+trends over time. It is divided in to two sections. The first (surveillance) uses
+regression forecasts to detect abnormal changes in LRTI and death rates over time. 
+This analysis evaluates whether changes are either higher or lower compared to 
+what would be expected based on historical trends.  
+The second analysis (impact) uses segmented regression to assess whether there has been 
+a change in patient presentations to the facility after COVID-19 introduction in 
+the project location.  
+Currently only data from IPD is considered, as these are more consistent 
+in terms of sufficient case counts and reporting. 
+
+## 1) Surveillance 
+
+This analysis evaluates whether rates are either higher or lower 
+compared to what would be expected based on historical trends. See technical 
+details in the appendix for methods used.
+
+### Interpretation 
+
+Based on the data available from previous years, while taking in to account 
+seasonality and trends, we would expect case (or death)
+rates to be within the ranges (prediction intervals [PI]), 95% (or 99%) of the time. 
+
+If observed case rates in the current year are above or below these ranges, it 
+suggests there is a change in case rates compared to what we would expect. 
+
+However, peaks above the range might not immediately suggest an unusual occurrence 
+(like an outbreak). Observed peaks may be due to different causative 
+organisms/strains for particular syndromes (e.g. in LRTI or diarrhoea) or changes
+in reporting (e.g. shifting to DHIS2). 
+
+The alert threshold is the level that suggests there has been a sustained change
+in case rates (compared to baseline from previous years and considering previous 
+weeks). 
+
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// prep_tsa_counts \\\
+--------------------------------------------------------------------------------
+
+This chunk prepares the cases data be used in time series analysis (tsibble object). 
+It defines the time unit of interest (epiweeks) and a grouping variable (project). 
+Additional count variables are created using a 2 week (leftsided) moving average, 
+as well as a variable to remove missing data by linear interpolation. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r prep_tsa_counts, eval = include_tsa}
+
+## make cases in to a tsibble dataset
+cases <- cases %>% 
+  ## make epiweek in to tsibble compatible week variable 
+  # mutate(epiweek = yearweek(epiweek)) %>% 
+  ## make counts in to tsibble so it recognises weeks as main time var
+  as_tsibble(index = epiweek, key = c(project, disease))
+
+
+## create a moving average variable (deals with missings)
+cases <- cases %>% 
+  group_by_key() %>% 
+  mutate(ma_2wk = slide_dbl(rate, ~mean(.x, na.rm = TRUE), .before = 2))
+
+
+## alternatively interpolate missings by linear trend 
+## between two nearest adjacent points
+cases <- cases %>% 
+  mutate(total = na_interpolation(total), 
+         patients = na_interpolation(patients),
+         ## re-calculate rate based on interpolations
+         rate_int = total / patients * 10000, 
+         ## create a population per 10,000 variable 
+         population = patients / 10000
+         )
+
+## to check what values have been imputed compared to the original
+# imputeTS::plotNA.imputations(cases$rate, cases$rate_int)
+
+
+## only keep lrti cases 
+lrti_cases <- filter(cases, disease == "LRTI") %>% 
+  as_tsibble(key = project, index = epiweek) %>% 
+  ungroup()
+```
+
+
+
+<!-- ### Lower respiratory tract infections -->
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// exploratory_tsa \\\
+--------------------------------------------------------------------------------
+
+This chunk does not produce anything in the output. 
+It is used for exploring the data suitability for time series analysis. 
+It does classical additive decomposition, looks at 
+autocorellation, and produces outputs from a spectrogram in weeks. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r exploratory_tsa, eval = FALSE}
+
+## decompose 
+dcmp <- lrti_cases %>% 
+  model(classical_decomposition(rate_int, type = "additive")) %>% 
+  components() %>% 
+  autoplot()
+
+## autocorellation 
+atcrl <- lrti_cases %>% 
+  ACF(rate_int, lag_max = 53) %>% 
+  autoplot()
+
+## get spectral periodogram for extracting weeks with the highest frequencies 
+## (checking of seasonality) 
+periodo <- purrr::map(projects,
+           function(i)
+             ## run periodogram for each project producing raw spectrum 
+             periodogram(
+               filter(lrti_cases, project == i), 
+               "rate_int", output = "raw")) %>% 
+  ## add in the project names 
+  set_names(projects) %>% 
+  ## pull out spectrum and frequency in to a dataframe for plotting
+  purrr::map_df(~tibble(freq = .$freq,
+                         spec = .$spec), .id = "name")
+  
+
+## get weeks that are as peaks 
+peak_weeks <- purrr::map(projects,
+                         ## run periodogram function for each project 
+                         ## (default produces weeks)
+                         function(i)
+                           periodogram(
+                             filter(lrti_cases, project == i), 
+                             "rate_int")) 
+
+## get a quick plot (ggplot but just takes x,y coords rather than df) 
+pgram <- ggplot(data = periodo, 
+                aes(x = 1/(freq/52),  y = log(spec))) + 
+  facet_grid(name~.) + 
+  geom_line() + 
+  labs(x = "Period (Weeks)", y = "Log(density)") + 
+  tsa_theme
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// sincos_tsa \\\
+--------------------------------------------------------------------------------
+
+This chunk fits a negative binomial regression to observed case data. 
+The model includes the trend (linear change over time) as well as
+two sine and cosine terms which account for seasonality. 
+The most appropriate weeks for cosine are selected by fourier series. 
+For details see: 
+https://fable.tidyverts.org/reference/common_xregs.html
+https://otexts.com/fpp3/useful-predictors.html
+https://bookdown.org/rdpeng/timeseriesbook/frequency-and-time-scale-analysis.html
+
+Prediction intervals are calculated manually for the fitted values of the model, 
+based on quantiles of the binomial distribution. 
+This means that at 95% alpha = 0.5 and at 99% alpha = 0.1.
+This is based off work by Dirk Schumacher in the {trendbreaker} package: 
+https://github.com/reconhub/trendbreaker
+For details on prediction intervals: 
+https://otexts.com/fpp2/prediction-intervals.html 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r sincos_tsa, eval = include_tsa}
+## define fourier terms (sincos) 
+lrti_cases$fourier <- purrr::map(
+  ## for each of the projects
+  projects,
+  ## run fourier (subsetting data appropriately)
+  function(i) {
+    ## only keep the relevant columns and project
+    forecast::fourier(
+      filter(lrti_cases, project == i) %>% 
+        select(epiweek, total),
+      ## choose number of sincos terms to include
+      2
+    )
+  }) %>%
+  ## bind together a list (bind_rows doesnt work because cols not named)
+  do.call(rbind, .)
+
+
+## fit a negative binomial model using data from 2019 and earlier 
+## include trend as well as seasonal fourier terms
+nbreg <- lrti_cases %>% 
+  as_tibble() %>% 
+  group_by(project) %>% 
+  nest() %>% 
+  mutate(fit = purrr::map(data, 
+                          ~ MASS::glm.nb(total ~ epiweek + fourier +
+                                           offset(log(population)), 
+                                       data = filter(., 
+                                      epiweek < surveillance_date))))
+
+## Need to change population to be 1 for prediction (this way returns rate)
+nbreg <- nbreg %>% 
+  ## within the nested list loop over the data frames for each project
+  mutate(data = purrr::map(data, 
+                           ## within each dataframe, change population to be 1
+                           ~mutate(.x, 
+                                   population = 1)))
+
+
+## use the regression to forecast and calculate appropriate prediction intervals
+lrti_cases <- nbreg %>% 
+  mutate(
+       ## Use predict to get fitted values for rate 
+       fitted = purrr::map2(.x = fit, .y = data, 
+                    .f = ~predict(.x, .y, type = "response")), 
+       ## calculate lower and upper PI (at 95% alpha = 0.5) [taken from Dirk Schumacher in {Trendbreaker}]
+       CI95_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.5 / 2, mu = .x, size = .y)), 
+       CI95_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.5 / 2, mu = .x, size = .y)),
+       ## calculate lower and upper PI (at 99% alpha = 0.1)
+       CI99_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.1 / 2, mu = .x, size = .y)), 
+       CI99_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.1 / 2, mu = .x, size = .y))
+       ) %>% 
+    ## keep data and newly created columns 
+    select(project, data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL) %>% 
+    ## pull back together in to one data frame 
+    unnest(c(data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL))
+
+## set population back to what it was 
+lrti_cases <- lrti_cases %>% 
+  mutate(## create a population per 10,000 variable 
+         population = patients / 10000
+         )
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// sincos_tsa_validation \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to check how well the model fits the data available (training).
+This is done by checking the residuals (or how far off the fitted values are 
+from the observed). 
+If assumptions are not met, then it may lead to less accurate predictions. 
+for details see: 
+https://otexts.com/fpp3/regression-evaluation.html
+
+For more options on model evaluation see: 
+https://qiushi.rbind.io/fpp/evaluating-a-regression-model.html
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r sincos_tsa_validation, eval = FALSE, , include = FALSE}
+
+## pull together the residuals in a dataframe
+resid_dat <- nbreg %>% 
+  ## get the predictions and residuals in the same scale as counts used to fit model
+  mutate(origpred = map(.x = fit, ~ broom::augment(.x, 
+                                            type.predict = "response", 
+                                            type.residuals = "response"))) %>% 
+  ## pull the dataset of counts and residuals out of list 
+  unnest(origpred) %>% 
+  ## drop extra data and fit (as these are already in the augmented dataset)
+  select(-data, -fit) %>% 
+  ## change to a tibble
+  as_tibble()
+
+## are the residuals fairly constant over time (if not: outbreaks? change in practice?)
+res_plot1 <- resid_dat %>%
+  ggplot(aes(x = epiweek, y = .resid)) +
+  facet_grid(project~.) +
+  geom_line() +
+  geom_point() + 
+  labs(x = "epiweek", y = "Residuals")
+
+## is there autocorelation in the residuals (is there a pattern to the error?)  
+res_plot2 <- resid_dat %>% 
+  as_tsibble(index = epiweek, key = project) %>% 
+  ACF(.resid, lag_max = 53) %>% 
+  autoplot()
+
+## are residuals normally distributed (are under or over estimating?)  
+res_plot3 <- resid_dat %>%
+  ggplot(aes(x = .resid)) +
+  facet_grid(project~.) +
+  geom_histogram(binwidth = 100) +
+  geom_rug() +
+  labs(y = "count") 
+  
+## compare observed counts to their residuals 
+  ## should also be no pattern 
+res_plot4 <- resid_dat %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  facet_grid(project~.) +
+  geom_point() +
+  labs(x = "Fitted", y = "Residuals")
+
+## formally test autocorellation of the residuals [TODO: FIX]
+## H0 is that residuals are from a white-noise series (i.e. random)
+ljungbox <- fit_lm %>% augment() %>% features(.resid, ljung_box, lag = 10, dof = 5)
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// forecast_tsa_validation \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to check how well the model is able to predict observed data. 
+https://otexts.com/fpp3/evaluation.html
+
+One method is to use training/testing datasets, i.e. fitting your model on data 
+up to 2018, and then seeing how well this model predicts 2019 data. 
+For details see: 
+https://otexts.com/fpp3/accuracy.html
+
+The second method (used here), is cross-validation. This consists of fitting your
+model with all available data. Then rolling over all available data in windows 
+and seeing how well it predicts one week ahead. 
+For details see: 
+https://otexts.com/fpp3/tscv.html
+
+For an overview of measures used see regression metrics in {yardstick}
+https://yardstick.tidymodels.org/reference/index.html
+
+A good forecast has uncorrelated residuals (i.e. no more data could have been 
+added to the model to improve fit) and the mean of residuals is zero (otherwise
+there is a bias in the forecast - consider adding the mean to the forecast), 
+residuals with constant variance and normally distributed residuals.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r forecast_tsa_validation, eval = FALSE, include = FALSE}
+
+## [TODO: FIX] - numbers dont always come out right
+
+## Cross validation: predicting week(s) ahead based on sliding window
+
+## expand your data by rolling over in 4 week windows (before + after) 
+## to predict 4 week ahead
+## (creates longer and longer chains of observations - keeps older data)
+
+## define window want to roll over
+roll_window <- 4
+
+## define weeks ahead want to predict 
+weeks_ahead <- 4
+
+
+## do for each project 
+purrr::map(  
+  ## for each of the projects
+  projects,
+  
+  ## run the forecast validation 
+  function(i) {
+        ## only use cases before year of interest (i.e. 2020)
+    case_roll <- lrti_cases %>% 
+      filter(epiweek < surveillance_date & 
+               project == i) %>% 
+      select(project, epiweek, disease, total, patients, rate_int) %>% 
+        ## drop the last x observations 
+        ## depending on how many weeks ahead forecasting 
+        ## (otherwise will be an actual forecast to "unknown")
+        slice(1:(n() - weeks_ahead)) %>%
+        as_tsibble(index = epiweek, key = c(disease)) %>% 
+        ## roll over each week in x after windows to create grouping ID 
+        ## depending on what rolling window specify
+        stretch_tsibble(.init = roll_window, .step = 1) %>% 
+      ## drop the first couple - as have no "before" cases
+      filter(.id > roll_window)
+    
+    
+    forecasts <- purrr::map(unique(case_roll$.id), function(j) {
+      
+      ## only keep the current fold being fit 
+      mini_data <- filter(case_roll, .id == j) %>% 
+        as_tibble()
+      
+      ## create a data set for forecasting on 
+      forecast_data <- tibble(
+        project = rep.int(NA, weeks_ahead), 
+        epiweek = seq(max(mini_data$epiweek) + 1, 
+                      max(mini_data$epiweek) + weeks_ahead, 
+                      by = 1), 
+        disease = rep.int(NA, weeks_ahead), 
+        total = rep.int(NA, weeks_ahead), 
+        patients = rep.int(NA, weeks_ahead), 
+        rate_int = rep.int(NA, weeks_ahead), 
+        .id = rep.int(NA, weeks_ahead)
+      )
+      
+      ## add the forecast data to the original 
+      mini_data <- bind_rows(mini_data, forecast_data)
+      
+      ## fit fourier terms 
+       ## only keep the relevant columns 
+      mini_data$fourier <- forecast::fourier(select(mini_data, epiweek, rate_int) %>% 
+                                               ## turn back to a tsibble for fun to work
+                                               as_tsibble(index = epiweek),
+                                             ## choose number of sincos terms to include
+                                                    2)
+      
+      ## fit a negative binomial with only those in the current fold
+      mini_nbreg <- MASS::glm.nb(rate_int ~ epiweek + fourier,
+                                 data = filter(mini_data, 
+                                               !is.na(.id)))
+      
+      ## forecast ahead 
+      mini_data$fitted <- predict(mini_nbreg, mini_data, type = "response")
+      
+      ## return only the forecast with the week 
+      filter(mini_data, is.na(.id)) %>% 
+        select(epiweek, fitted)
+        
+      }
+      )
+    
+    ## make the list in to a data frame with all the forecasts
+    forecasts <- bind_rows(forecasts)
+    
+    ## join the forecasts with the observed
+    forecasts <- left_join(forecasts, 
+                           filter(lrti_cases, project == i) %>%
+                             as_tibble() %>% 
+                             select(epiweek, rate_int), 
+                           by = "epiweek")
+    
+    ## using {yardstick} compute metrics
+      ## RMSE: Root mean squared error
+      ## MAE:  Mean absolute error	
+      ## MASE: Mean absolute scaled error
+      ## MAPE: Mean absolute percent error
+    model_metrics <- bind_rows(
+      ## in your forcasted dataset compare the observed to the predicted
+      rmse(forecasts, rate_int, fitted), 
+      mae( forecasts, rate_int, fitted),
+      mase(forecasts, rate_int, fitted),
+      mape(forecasts, rate_int, fitted),
+      ) %>% 
+      ## only keep the metric type and its output
+      select(Metric  = .metric, 
+             Measure = .estimate) %>% 
+      ## make in to wide format so can bind rows after
+      pivot_wider(names_from = Metric, values_from = Measure) %>%
+      ## add in current project name
+      mutate(project = i)
+    
+    ## return model metrics 
+    model_metrics
+    
+  }
+  
+) %>% 
+  ## combine in to one data frame
+  bind_rows()
+
+```
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// aberration_methods \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to create an alert threshold based on outbreak detection 
+algorithms. 
+
+The first option uses the improved Farington method. This fits a negative 
+binomial glm (including trend) and down-weights past outbreaks (outliers) to 
+create a threshold level. 
+
+The second option use the glrnb method. This also fits a negative binomial glm 
+but includes trend and fourier terms (so is favoured here). The regression is used
+to calculate the "control mean" (~fitted values) - it then uses a computed 
+generalized likelihood ratio statistic to assess if there is shift in the mean 
+for each week. Note that the threshold for each week takes in to account previous
+weeks so if there is a sustained shift an alarm will be triggered. 
+(Also note that after each alarm the algorithm is reset)
+
+For details see: 
+https://cran.r-project.org/web/packages/surveillance/vignettes/monitoringCounts.pdf
+https://cran.r-project.org/web/packages/surveillance/vignettes/glrnb.pdf 
+
+Also see this for an explanation of general additive models: 
+https://twitter.com/ucfagls/status/1281655700163194881
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r aberration_methods, eval = (include_tsa * include_aberration) == 1}
+
+for (i in projects) {
+  ## define surveillance time series object
+  ## subset testing cases to the project being run 
+  lrti_sts <- sts(observed = lrti_cases$rate_int[which(lrti_cases$project == i)],
+                  # population = matrix(lrti_cases$population[which(lrti_cases$project == i)]),
+                  start = c(
+                    ## subset to only keep the year from start_date 
+                    as.numeric(str_sub(start_date, 1, 4)), 
+                    ## subset to only keep the week from start_date
+                    as.numeric(str_sub(start_date, 7, 8))), 
+                  freq = 52)
+  
+  
+  ## define which weeks to include 
+  ## (use first week available in data - otherwise SSudan fails, missing early data)
+  weekrange <- surveillance_date - min(lrti_cases$epiweek[lrti_cases$project == i])
+  
+  #### using the farrington algorithm 
+
+  # ## define control
+  # ctrl <- list(
+  #              ## define what time period that want threshold for (i.e. 2020)
+  #              range = which(lrti_sts@epoch > weekrange),
+  #              b = 5, ## how many years backwards for baseline
+  #              w = 2, ## rolling window size in weeks
+  #              weightsThreshold = 2.58, ## reweighting past outbreaks (improved noufaily method - original suggests 1)
+  #              ## pastWeeksNotIncluded = 3, ## use all weeks available (noufaily suggests drop 26)
+  #              trend = TRUE,
+  #              pThresholdTrend = 1, ## 0.05 normally, however 1 is advised in the improved method (i.e. always keep)
+  #              thresholdMethod = "nbPlugin", 
+  #              populationOffset = TRUE
+  #              )
+  # ## apply farrington flexible method
+  # farringtonmethod <- farringtonFlexible(lrti_sts, ctrl, verbose = FALSE)
+  # 
+  # ## add farrington threshold to dataset
+  # lrti_cases[which(lrti_cases$project == i &
+  #                       lrti_cases$epiweek >= surveillance_date),
+  #               "threshold"] <- farringtonmethod@upperbound
+  
+  
+  
+  
+  
+  ### using glrnb 
+  ## set up using https://cran.r-project.org/web/packages/surveillance/vignettes/glrnb.pdf
+
+  ## define control options
+  ctrl <- list(
+               ## define what time period that want threshold for (i.e. 2020)
+               range = which(lrti_sts@epoch > weekrange),
+               mu0 = list(S = 2,    ## number of fourier terms (harmonics) to include
+                          trend = TRUE,   ## whether to include trend or not
+                          refit = FALSE), ## whether to refit model after each alarm
+               ## cARL = threshold for GLR statistic (arbitrary)
+                  ## 3 ~ middle ground for minimising false positives
+                  ## 1 fits to the 99%PI of glm.nb - with changes after peaks (threshold lowered for alert)
+               c.ARL = 2,
+               # theta = log(1.5), ## equates to a 50% increase in cases in an outbreak
+               ret = "cases"     ## return threshold upperbound as case counts
+               )
+
+  ## apply the glrnb method
+  glrnbmethod <- glrnb(lrti_sts, control = ctrl, verbose = FALSE)
+
+    ## add glrnb threshold to dataset
+  lrti_cases[which(lrti_cases$project == i &
+                        lrti_cases$epiweek >= surveillance_date),
+                "threshold"] <- glrnbmethod@upperbound
+  
+  
+}
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// sincos_tsa_plot \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to plot observed and modelled data. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r sincos_tsa_plot, eval = include_tsa, fig.cap = "LRTI case rate with expected ranges (prediction intervals [PI]) and alert thresholds by week of discharge"}
+
+## define the appropriate y-axis label
+unit_lable <- if_else(admissions_based, 
+                      "LRTI (n/10,000 admissions)", 
+                      "LRTI (n/10,000 discharges)")
+
+## plot cases and fits with confidence intervals
+base_plot <- ggplot(lrti_cases, aes(x = as.Date(epiweek))) +
+  ## plot for each project row-wise
+  facet_grid(project ~ .) +
+  
+  ## plot interpolated observed values as line - label observed (colour defined later)
+  geom_line(aes(y = rate_int, colour = "Observed")) +
+  
+  ## plot in points for the observed rates - colour by whether is above PI
+  geom_point(aes(y = rate_int, 
+                 colour = if_else(rate_int > CI99_UL, "Excess", "Observed"), 
+                 size = if_else(rate_int > CI99_UL, "trigger", "normal"))) + 
+  
+  ## plot 95% prediction intervals as a ribbon - alpha sets transparency
+  geom_ribbon(aes(ymin = CI95_LL, ymax = CI95_UL, alpha = "95% PI"), fill = "grey60") +
+  ## plot 99% prediction intervals as a ribbon - alpha sets transparency
+  geom_ribbon(aes(ymin = CI99_LL, ymax = CI99_UL, alpha = "99% PI"), fill = "grey60") +
+
+  ## plot modelled values as a line
+  geom_line(aes(y = fitted, colour = "Fitted")) +
+  ## set the colours for defined parts (match names to colours)
+  scale_colour_manual(values = c("Observed" = "black",
+                                 "Fitted" = "blue",
+                                 "Excess" = "red", 
+                                 "Alert threshold" = "orange")) +
+  ## define how see-through parts are (match names to alpha)
+  scale_alpha_manual(values = c("95% PI" = 0.4,
+                                "99% PI" = 0.2)) +
+  
+  scale_size_manual(values = c("trigger" = 2, 
+                    "normal" = NA_real_),
+                    guide = FALSE) + 
+  
+  
+  ## reverse the order of the legend
+  guides(colour = guide_legend(reverse = TRUE)) +
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) +
+  ## label the axes appropriately and remove legend titles
+  labs(x = week_lable, y = unit_lable,
+       colour = element_blank(), alpha = element_blank()) +
+  ## add in theme and axis labels
+  tsa_axes +
+  tsa_theme
+
+## if aberration methods set to be included in control chunk then add dashed line
+if (include_aberration) {
+  base_plot <- base_plot + 
+    ## add in upper bound of aberration algorithm
+    geom_line(aes(y = threshold, colour = "Alert threshold"), linetype = "dashed") 
+}
+  
+
+## return plot 
+base_plot
+```
+
+
+
+<!-- ### All-cause mortality -->
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// prep_tsa_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk prepares the deaths data be used in time series analysis (tsibble object). 
+It defines the time unit of interest (epiweeks) and a grouping variable (project). 
+Additional count variables are created using a 2 week (leftsided) moving average, 
+as well as a variable to remove missing data by linear interpolation. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r prep_tsa_deaths, eval = include_tsa}
+
+## make deaths in to a tsibble dataset
+deaths <- deaths %>% 
+  ## make epiweek in to tsibble compatible week variable 
+  mutate(epiweek = yearweek(epiweek)) %>% 
+  ## make counts in to tsibble so it recognises weeks as main time var
+  as_tsibble(index = epiweek, key = c(project, disease))
+
+
+## create a moving average variable (deals with missings)
+deaths <- deaths %>% 
+  group_by_key() %>% 
+  mutate(ma_2wk = slide_dbl(rate, ~mean(.x, na.rm = TRUE), .before = 2))
+
+
+## alternatively interpolate missings by linear trend 
+## between two nearest adjacent points
+deaths <- deaths %>% 
+    mutate(total = na_interpolation(total), 
+         patients = na_interpolation(patients),
+         ## re-calculate rate based on interpolations
+         rate_int = total / patients * 10000, 
+         ## create a population per 10,000 variable 
+         population = patients / 10000
+         )
+
+## to check what values have been imputed compared to the original [TODO: FIX]
+# imputeTS::plotNA.imputations(deaths$rate, deaths$rate_int)
+
+
+## only keep overall deaths 
+overall_deaths <- filter(deaths, disease == "Overall") %>% 
+  as_tsibble(key = project, index = epiweek) %>% 
+  ungroup()
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// basic_tsa_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk creates a very basic plot showing weekly median mortality in weeks of 
+previous years (with range) and the current year.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r basic_tsa_deaths, eval = show_details, fig.cap = "Weekly all cause mortality for the current year compared to median and range from previous years"}
+
+## get the median min max and 95% centile range from previous years 
+avg_counts <- overall_deaths %>% 
+  ## turn to tsibble to be able to change to numeric weeks 
+  as_tibble() %>% 
+  ## create a week number variable (without year)
+  mutate(week = format(epiweek, format = "%V")) %>% 
+  ## filter for previous years
+  filter(epiweek < surveillance_date) %>% 
+  ## for each project and week number
+  group_by(project, week) %>% 
+  ## calculate median, min, max and then the 95% range based on percentiles
+  summarise(avg = median(rate_int, na.rm = TRUE), 
+            minz = min(rate_int, na.rm = TRUE), 
+            maxz = max(rate_int, na.rm = TRUE), 
+            low = quantile(rate_int, 0.025), 
+            high = quantile(rate_int, 0.975))
+
+## get rates for the current year by weeks 
+year_counts <- overall_deaths %>% 
+  as_tibble() %>% 
+  mutate(week = format(epiweek, format = "%V"), 
+         year = format(epiweek, format = "%Y"), 
+         ## create a tag for whether it is in the current year or not
+         filler = if_else(epiweek < surveillance_date, "Past years", "Current year")
+         )
+  
+  
+## start a plot 
+ggplot() +
+  ## do for each project 
+  facet_grid(project ~ .) + 
+  ## plot centile rage as a shaded area
+  geom_ribbon(data = avg_counts, aes(x = week, ymin = low, ymax = high,
+                                     group = 1, fill = "Past 95% centile range"), 
+              alpha = 0.3) +
+  ## plot only the current year and colour based on tag from above (will all be "current year")
+  geom_line(data = filter(year_counts, 
+                          year == 2020), aes(x = week, y = rate_int, 
+                                             group = year, colour = filler)) + 
+  ## plot median as a dotted line 
+  geom_line(data = avg_counts, aes(x = week, y = avg, colour = "Past median", group = 1),
+            linetype = 2) +
+  ## choose appropriate colours and fill 
+  scale_colour_manual(values = c("Past median" = "black", 
+                                 "Current year" = "red", 
+                                 "Past years" = "grey60")) + 
+  scale_fill_manual(values = c("Past 95% centile range" = "grey80"), 
+                    guide = guide_legend(reverse = TRUE)) +
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) +
+  ## fix the x axis labels to only show every forth number
+  ## and show a 0 infront of numbers less than 10
+  scale_x_discrete(breaks = seq(01, 53, by = 4) %>% str_pad(2, pad = "0")) + 
+  ## label axes appropriately 
+  labs(x = "Week of discharge", y = "Mortality rate (deaths/10,000 discharges)", 
+       colour = element_blank(), fill = element_blank()) + 
+  ## apply tsa theme for axes etc 
+  tsa_theme
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// exploratory_tsa_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk does not produce anything in the output. 
+It is used for exploring the data suitability for time series analysis. 
+It does classical additive decomposition, looks at 
+autocorellation, and produces outputs from a spectrogram in weeks.  
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r exploratory_tsa_deaths, eval = FALSE}
+
+## decompose 
+dcmp <- overall_deaths %>% 
+  model(classical_decomposition(rate_int, type = "additive")) %>% 
+  components() %>% 
+  autoplot()
+
+## autocorellation 
+atcrl <- overall_deaths %>% 
+  ACF(rate_int, lag_max = 53) %>% 
+  autoplot()
+
+## get spectral periodogram for extracting weeks with the highest frequencies 
+## (checking of seasonality) 
+periodo <- purrr::map(projects,
+           function(i)
+             ## run periodogram for each project producing raw spectrum 
+             periodogram(
+               filter(overall_deaths, project == i), 
+               "rate_int", output = "raw")) %>% 
+  ## add in the project names 
+  set_names(projects) %>% 
+  ## pull out spectrum and frequency in to a dataframe for plotting
+  purrr::map_df(~tibble(freq = .$freq,
+                         spec = .$spec), .id = "name")
+  
+
+## get weeks that are as peaks 
+peak_weeks <- purrr::map(projects,
+                         ## run periodogram function for each project 
+                         ## (default produces weeks)
+                         function(i)
+                           periodogram(
+                             filter(overall_deaths, project == i), 
+                             "rate_int")) 
+
+## get a quick plot (ggplot but just takes x,y coords rather than df) 
+pgram <- ggplot(data = periodo, 
+                aes(x = 1/(freq/52),  y = log(spec))) + 
+  facet_grid(name~.) + 
+  geom_line() + 
+  labs(x = "Period (Weeks)", y = "Log(density)") + 
+  tsa_theme
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// sincos_tsa_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk fits a negative binomial regression to observed case data. 
+The model includes the trend (linear change over time) as well as
+two sine and cosine terms which account for seasonality. 
+The most appropriate weeks for cosine are selected by fourier series. 
+For details see: 
+https://fable.tidyverts.org/reference/common_xregs.html
+https://otexts.com/fpp3/useful-predictors.html
+https://bookdown.org/rdpeng/timeseriesbook/frequency-and-time-scale-analysis.html
+
+Prediction intervals are calculated manually for the fitted values of the model, 
+based on quantiles of the binomial distribution. 
+This means that at 95% alpha = 0.5 and at 99% alpha = 0.1.
+This is based off work by Dirk Schumacher in the {trendbreaker} package: 
+https://github.com/reconhub/trendbreaker
+For details on prediction intervals: 
+https://otexts.com/fpp2/prediction-intervals.html 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r sincos_tsa_deaths, eval = include_tsa}
+
+## define fourier terms (sincos) 
+overall_deaths$fourier <- purrr::map(
+  ## for each of the projects
+  projects,
+  ## run fourier (subsetting data appropriately)
+  function(i) {
+    ## only keep the relevant columns and project
+    forecast::fourier(
+      filter(overall_deaths, project == i) %>% 
+        select(epiweek, total),
+      ## choose number of sincos terms to include
+      2
+    )
+  }) %>%
+  ## bind together a list (bind_rows doesnt work because cols not named)
+  do.call(rbind, .)
+
+
+## fit a negative binomial model using data from 2019 and earlier 
+## include trend as well as seasonal fourier terms
+nbreg <- overall_deaths %>% 
+  as_tibble() %>% 
+  group_by(project) %>% 
+  nest() %>% 
+  mutate(fit = purrr::map(data, 
+                          ~ MASS::glm.nb(total ~ epiweek + fourier +
+                                           offset(log(population)), 
+                                       data = filter(., 
+                                      epiweek < surveillance_date))))
+
+
+## Need to change population to be 1 for prediction (this way returns rate)
+nbreg <- nbreg %>% 
+  ## within the nested list loop over the data frames for each project
+  mutate(data = purrr::map(data, 
+                           ## within each dataframe, change population to be 1
+                           ~mutate(.x, 
+                                   population = 1)))
+
+
+## use the regression to forecast and calculate appropriate prediction intervals
+overall_deaths <- nbreg %>% 
+  mutate(
+       ## Use predict to get fitted values for rate 
+       fitted = purrr::map2(.x = fit, .y = data, 
+                    .f = ~predict(.x, .y, type = "response")), 
+       ## calculate lower and upper PI (at 95% alpha = 0.5) [taken from Dirk Schumacher in {Trendbreaker}]
+       CI95_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.5 / 2, mu = .x, size = .y)), 
+       CI95_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.5 / 2, mu = .x, size = .y)),
+       ## calculate lower and upper PI (at 99% alpha = 0.1)
+       CI99_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.1 / 2, mu = .x, size = .y)), 
+       CI99_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.1 / 2, mu = .x, size = .y))
+       ) %>% 
+    ## keep data and newly created columns 
+    select(project, data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL) %>% 
+    ## pull back together in to one data frame 
+    unnest(c(data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL))
+
+
+
+## set population back to what it was 
+overall_deaths <- overall_deaths %>% 
+  mutate(## create a population per 10,000 variable 
+         population = patients / 10000
+         )
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// sincos_tsa_validation_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to check how well the model fits the data available (training).
+This is done by checking the residuals (or how far off the fitted values are 
+from the observed). 
+If assumptions are not met, then it may lead to less accurate predictions. 
+for details see: 
+https://otexts.com/fpp3/regression-evaluation.html
+
+For more options on model evaluation see: 
+https://qiushi.rbind.io/fpp/evaluating-a-regression-model.html
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r sincos_tsa_validation_deaths, eval = FALSE, , include = FALSE}
+
+## [TODO: FIX]
+
+## pull together the residuals in a dataframe
+resid_dat <- nbreg %>% 
+  ## get the predictions and residuals in the same scale as counts used to fit model
+  mutate(origpred = map(.x = fit, ~ broom::augment(.x, 
+                                            type.predict = "response", 
+                                            type.residuals = "response"))) %>% 
+  ## pull the dataset of counts and residuals out of list 
+  unnest(origpred) %>% 
+  ## drop extra data and fit (as these are already in the augmented dataset)
+  select(-data, -fit) %>% 
+  ## change to a tibble
+  as_tibble()
+
+## are the residuals fairly constant over time (if not: outbreaks? change in practice?)
+res_plot1 <- resid_dat %>%
+  ggplot(aes(x = epiweek, y = .resid)) +
+  facet_grid(project~.) +
+  geom_line() +
+  geom_point() + 
+  labs(x = "epiweek", y = "Residuals")
+
+## is there autocorelation in the residuals (is there a pattern to the error?)  
+res_plot2 <- resid_dat %>% 
+  as_tsibble(index = epiweek, key = project) %>% 
+  ACF(.resid, lag_max = 53) %>% 
+  autoplot()
+
+## are residuals normally distributed (are under or over estimating?)  
+res_plot3 <- resid_dat %>%
+  ggplot(aes(x = .resid)) +
+  facet_grid(project~.) +
+  geom_histogram(binwidth = 100) +
+  geom_rug() +
+  labs(y = "count") 
+  
+## compare observed counts to their residuals 
+  ## should also be no pattern 
+res_plot4 <- resid_dat %>%
+  ggplot(aes(x = .fitted, y = .resid)) +
+  facet_grid(project~.) +
+  geom_point() +
+  labs(x = "Fitted", y = "Residuals")
+
+## formally test autocorellation of the residuals [TODO: FIX]
+## H0 is that residuals are from a white-noise series (i.e. random)
+ljungbox <- fit_lm %>% augment() %>% features(.resid, ljung_box, lag = 10, dof = 5)
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// forecast_tsa_validation_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to check how well the model is able to predict observed data. 
+https://otexts.com/fpp3/evaluation.html
+
+One method is to use training/testing datasets, i.e. fitting your model on data 
+up to 2018, and then seeing how well this model predicts 2019 data. 
+For details see: 
+https://otexts.com/fpp3/accuracy.html
+
+The second method (used here), is cross-validation. This consists of fitting your
+model with all available data. Then rolling over all available data in windows 
+and seeing how well it predicts one week ahead. 
+For details see: 
+https://otexts.com/fpp3/tscv.html
+
+For an overview of measures used see regression metrics in {yardstick}
+https://yardstick.tidymodels.org/reference/index.html
+
+A good forecast has uncorrelated residuals (i.e. no more data could have been 
+added to the model to improve fit) and the mean of residuals is zero (otherwise
+there is a bias in the forecast - consider adding the mean to the forecast), 
+residuals with constant variance and normally distributed residuals.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r forecast_tsa_validation_deaths, eval = FALSE, include = FALSE}
+
+## [TODO: FIX] - numbers dont always come out right
+
+## Cross validation: predicting week(s) ahead based on sliding window
+
+## expand your data by rolling over in 4 week windows (before + after) 
+## to predict 4 week ahead
+## (creates longer and longer chains of observations - keeps older data)
+
+## define window want to roll over
+roll_window <- 4
+
+## define weeks ahead want to predict 
+weeks_ahead <- 4
+
+
+## do for each project 
+purrr::map(  
+  ## for each of the projects
+  projects,
+  
+  ## run the forecast validation 
+  function(i) {
+        ## only use cases before 2020
+    case_roll <- overall_deaths %>% 
+      filter(epiweek < surveillance_date & 
+               project == i) %>% 
+      select(project, epiweek, disease, total, patients, rate_int) %>% 
+        ## drop the last observation (otherwise will be an actual forecast to "unknown")
+        slice(1:(n() - 1)) %>%
+        as_tsibble(index = epiweek, key = c(disease)) %>% 
+        ## roll over each week in 3 after windows to create grouping ID
+        stretch_tsibble(.init = roll_window, .step = 1) %>% 
+      ## drop the first couple - as have no "before" cases
+      filter(.id > roll_window)
+    
+    
+    forecasts <- purrr::map(unique(case_roll$.id), function(j) {
+      
+      ## only keep the current fold being fit 
+      mini_data <- filter(case_roll, .id == j) %>% 
+        as_tibble()
+      
+      ## create a data set for forecasting on 
+      forecast_data <- tibble(
+        project = rep.int(NA, weeks_ahead), 
+        epiweek = seq(max(mini_data$epiweek) +1, 
+                      max(mini_data$epiweek) + weeks_ahead, 
+                      by = 1), 
+        disease = rep.int(NA, weeks_ahead), 
+        total = rep.int(NA, weeks_ahead), 
+        patients = rep.int(NA, weeks_ahead), 
+        rate_int = rep.int(NA, weeks_ahead), 
+        .id = rep.int(NA, weeks_ahead)
+      )
+      
+      ## add the forecast data to the original 
+      mini_data <- bind_rows(mini_data, forecast_data)
+      
+      ## fit fourier terms 
+       ## only keep the relevant columns 
+      mini_data$fourier <- forecast::fourier(select(mini_data, epiweek, rate_int) %>% 
+                                               ## turn back to a tsibble for fun to work
+                                               as_tsibble(index = epiweek),
+                                             ## choose number of sincos terms to include
+                                                    2)
+      
+      ## fit a negative binomial with only those in the current fold
+      mini_nbreg <- MASS::glm.nb(rate_int ~ epiweek + fourier,
+                                 data = filter(mini_data, 
+                                               !is.na(.id)))
+      
+      ## forecast ahead 
+      mini_data$fitted <- predict(mini_nbreg, mini_data, type = "response")
+      
+      ## return only the forecast with the week 
+      filter(mini_data, is.na(.id)) %>% 
+        select(epiweek, fitted)
+        
+      }
+      )
+    
+    ## make the list in to a data frame with all the forecasts
+    forecasts <- bind_rows(forecasts)
+    
+    ## join the forecasts with the observed
+    forecasts <- left_join(forecasts, 
+                           filter(overall_deaths, project == i) %>%
+                             as_tibble() %>% 
+                             select(epiweek, rate_int), 
+                           by = "epiweek")
+    
+    ## using {yardstick} compute metrics
+      ## RMSE: Root mean squared error
+      ## MAE:  Mean absolute error	
+      ## MASE: Mean absolute scaled error
+      ## MAPE: Mean absolute percent error
+    model_metrics <- bind_rows(
+      ## in your forcasted dataset compare the observed to the predicted
+      rmse(forecasts, rate_int, fitted), 
+      mae( forecasts, rate_int, fitted),
+      mase(forecasts, rate_int, fitted),
+      mape(forecasts, rate_int, fitted),
+      ) %>% 
+      ## only keep the metric type and its output
+      select(Metric  = .metric, 
+             Measure = .estimate) %>% 
+      ## make in to wide format so can bind rows after
+      pivot_wider(names_from = Metric, values_from = Measure) %>%
+      ## add in current project name
+      mutate(project = i)
+    
+    ## return model metrics 
+    model_metrics
+    
+  }
+  
+) %>% 
+  ## combine in to one data frame
+  bind_rows()
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// aberration_methods_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to create an alert threshold based on outbreak detection 
+algorithms. 
+
+The first option uses the improved Farington method. This fits a negative 
+binomial glm (including trend) and down-weights past outbreaks (outliers) to 
+create a threshold level. 
+
+The second option use the glrnb method. This also fits a negative binomial glm 
+but includes trend and fourier terms (so is favoured here). The regression is used
+to calculate the "control mean" (~fitted values) - it then uses a computed 
+generalized likelihood ratio statistic to assess if there is shift in the mean 
+for each week. Note that the threshold for each week takes in to account previous
+weeks so if there is a sustained shift an alarm will be triggered. 
+(Also note that after each alarm the algorithm is reset)
+
+For details see: 
+https://cran.r-project.org/web/packages/surveillance/vignettes/monitoringCounts.pdf
+https://cran.r-project.org/web/packages/surveillance/vignettes/glrnb.pdf
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r aberration_methods_deaths, eval = (include_tsa * include_aberration) == 1}
+
+for (i in projects) {
+  ## define surveillance time series object
+  ## subset testing cases to the project being run 
+  deaths_sts <- sts(observed = overall_deaths[which(overall_deaths$project == i), 
+                                           "rate_int"],
+                   start = c(
+                    ## subset to only keep the year from start_date 
+                    as.numeric(str_sub(start_date, 1, 4)), 
+                    ## subset to only keep the week from start_date
+                    as.numeric(str_sub(start_date, 7, 8))), 
+                   freq = 52)
+  
+  
+  ## define which weeks to include 
+  ## (use first week available in data - otherwise SSudan fails, missing early data)
+  weekrange <- surveillance_date - min(overall_deaths$epiweek[overall_deaths$project == i])
+  
+  #### using the farrington algorithm 
+
+  # ## define control
+  # ctrl <- list(
+  #              ## define what time period that want threshold for (i.e. 2020)
+  #              range = which(deaths_sts@epoch > weekrange),
+  #              b = 5, ## how many years backwards for baseline
+  #              w = 2, ## rolling window size in weeks
+  #              weightsThreshold = 2.58, ## reweighting past outbreaks (improved noufaily method - original suggests 1)
+  #              ## pastWeeksNotIncluded = 3, ## use all weeks available (noufaily suggests drop 26)
+  #              trend = TRUE,
+  #              pThresholdTrend = 1, ## 0.05 normally, however 1 is advised in the improved method (i.e. always keep)
+  #              thresholdMethod = "nbPlugin"
+  #              )
+  # ## apply farrington flexible method
+  # farringtonmethod <- farringtonFlexible(deaths_sts, ctrl, verbose = FALSE)
+  # 
+  # ## add farrington threshold to dataset
+  # overall_deaths[which(overall_deaths$project == i &
+  #                       overall_deaths$epiweek >= surveillance_date),
+  #               "threshold"] <- farringtonmethod@upperbound
+  
+  
+  
+  
+  
+  ### using glrnb 
+  ## set up using https://cran.r-project.org/web/packages/surveillance/vignettes/glrnb.pdf
+
+  ## define control options
+  ctrl <- list(
+               ## define what time period that want threshold for (i.e. 2020)
+               range = which(deaths_sts@epoch > weekrange),
+               mu0 = list(S = 2,    ## number of fourier terms (harmonics) to include
+                          trend = TRUE,   ## whether to include trend or not
+                          refit = FALSE), ## whether to refit model after each alarm
+               ## cARL = threshold for GLR statistic (arbitrary)
+                  ## 3 ~ middle ground for minimising false positives
+                  ## 1 fits to the 99%PI of glm.nb - with changes after peaks (threshold lowered for alert)
+               c.ARL = 2,
+               theta = log(1.5), ## equates to a 50% increase in cases in an outbreak
+               ret = "cases"     ## return threshold upperbound as case counts
+               )
+
+  ## apply the glrnb method
+  glrnbmethod <- glrnb(deaths_sts, control = ctrl, verbose = FALSE)
+
+    ## add glrnb threshold to dataset
+  overall_deaths[which(overall_deaths$project == i &
+                        overall_deaths$epiweek >= surveillance_date),
+                "threshold"] <- glrnbmethod@upperbound
+  
+  
+}
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// sincos_tsa_plot_deaths \\\
+--------------------------------------------------------------------------------
+
+This chunk is used to plot observed and modelled data. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r sincos_tsa_plot_deaths, eval = include_tsa, fig.cap = "All-cause death rate with expected ranges (prediction intervals [PI]) and alert thresholds by week of discharge"}
+
+
+## define the appropriate y-axis label
+unit_lable <- if_else(admissions_based, 
+                      "Deaths (n/10,000 admissions)", 
+                      "Deaths (n/10,000 discharges)")
+
+## plot cases and fits with confidence intervals
+base_plot <- ggplot(overall_deaths, aes(x = as.Date(epiweek))) +
+  ## plot for each project row-wise
+  facet_grid(project ~ .) +
+  
+  ## plot interpolated observed values as line - label observed (colour defined later)
+  geom_line(aes(y = rate_int, colour = "Observed")) +
+    
+  ## plot in points for the observed rates - colour by whether is above PI
+  geom_point(aes(y = rate_int, 
+                 colour = if_else(rate_int > CI99_UL, "Excess", "Observed"), 
+                 size = if_else(rate_int > CI99_UL, "trigger", "normal"))) + 
+  
+  ## plot 95% prediction intervals as a ribbon - alpha sets transparency
+  geom_ribbon(aes(ymin = CI95_LL, ymax = CI95_UL, alpha = "95% PI"), fill = "grey60") +
+  ## plot 99% prediction intervals as a ribbon - alpha sets transparency
+  geom_ribbon(aes(ymin = CI99_LL, ymax = CI99_UL, alpha = "99% PI"), fill = "grey60") +
+
+  ## plot modelled values as a line
+  geom_line(aes(y = fitted, colour = "Fitted")) +
+  ## set the colours for defined parts (match names to colours)
+  scale_colour_manual(values = c("Observed" = "black",
+                                 "Fitted" = "blue",
+                                 "Excess" = "red",
+                                 "Alert threshold" = "orange")) +
+  scale_alpha_manual(values = c("95% PI" = 0.4,
+                                "99% PI" = 0.2)) +
+  
+  scale_size_manual(values = c("trigger" = 2, 
+                    "normal" = NA_real_),
+                    guide = FALSE) + 
+  
+  ## reverse the order of the legend
+  guides(colour = guide_legend(reverse = TRUE)) +
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) +
+  ## label the axes appropriately and remove legend titles
+  labs(x = week_lable, y = unit_lable,
+       colour = element_blank(), alpha = element_blank()) +
+  ## add in theme and axis labels
+  tsa_axes +
+  tsa_theme
+
+## if aberration methods set to be included in control chunk then add dashed line
+if (include_aberration) {
+  base_plot <- base_plot + 
+    ## add in upper bound of aberration algorithm
+    geom_line(aes(y = threshold, colour = "Alert threshold"), linetype = "dashed") 
+}
+
+## return plot 
+base_plot
+ 
+```
+
+\newpage
+
+## 2) Impact 
+
+This section evaluates the impact of Covid-19 on services by using
+segmented regression for specific diseases of interest. 
+It analyses if there have been changes in case numbers of other diseases 
+(beyond LRTI) that could be related to the Covid-19 pandemic 
+(e.g changes in health seeking behaviour or interruption/changes in service provision)   
+It uses rates over time to see if these change after the date the 
+first confirmed Covid-19 case was diagnosed in the project region (or the nearest
+applicable region with reliable information). 
+
+### Interpretation 
+
+Similar to how we would interpret surveillance results above. 
+Based on the data available from previous years (pre Covid-19 period), we 
+calculate an expected rate for the post Covid-19 period, while taking the trend
+(increase/decrease) over time and seasonal variation in to account. 
+Then we calculate the percentage difference between the expected rate and the 
+observed rate in the post Covid-19 period.  
+
+A relevant change in rate would have both confidence intervals either above or 
+below zero (i.e. increased or decreased) and a small p-value. *Nb.* small case numbers 
+or noisy (inconsistent) data will produce unreliable results. Therefore a small 
+p-value with a very wide confidence interval might not actually be relevant. 
+
+
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// prep_tsa_patient_counts \\\
+--------------------------------------------------------------------------------
+
+This chunk prepares the patient counts data be used in time series analysis (tsibble object). 
+It defines the time unit of interest (epiweeks) and a grouping variable (project). 
+Additional count variables are created using a 2 week (leftsided) moving average, 
+as well as a variable to remove missing data by linear interpolation. 
+Bed counts are joined for use as a denominator.
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r prep_tsa_patient_counts, eval = include_tsa}
+
+
+## make patient counts in to a tsibble (to be able to add fourier)
+patient_counts <- patient_counts %>% 
+  ## make counts in to tsibble so it recognises weeks as main time var
+  as_tsibble(index = epiweek, key = project)
+
+
+## join bed counts to use as a denominator 
+patient_counts <- left_join(patient_counts, 
+                            select(bed_counts, project, week, beds),
+                            by = c("project", "epiweek" = "week")
+                            )
+
+
+## make rows where admissions or beds less than 10 NA (otherwise throws off everything)
+patient_counts[which(patient_counts$total < 10 |
+                       patient_counts$beds < 10), c("total", "beds")] <- NA
+
+
+## create a moving average variable (deals with missings)
+# patient_counts <- patient_counts %>% 
+#   group_by_key() %>% 
+#   mutate(ma_2wk = slide_dbl(rate, ~mean(.x, na.rm = TRUE), .before = 2))
+
+
+## alternatively interpolate missings by linear trend 
+## between two nearest adjacent points
+patient_counts <- patient_counts %>% 
+  mutate(total = na_interpolation(total), 
+         beds = na_interpolation(beds),
+         ## re-calculate rate based on interpolations
+         rate_int = total / beds * 10000, 
+         ## create a population per 10,000 variable 
+         population = beds / 10000
+         )
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// overall_patient_impact \\\
+--------------------------------------------------------------------------------
+
+This chunk is to fit a segmented regression on the overall patient counts. 
+It produces a table with percentage change and plots rates with segmented fit. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r overall_patient_impact, eval = include_tsa}
+
+
+## In general, the negative binomial regression model can be written as follows.
+# log(Y_t)= β_0 + β_1*t+ β_2*δ(t-t_0) + β_3*(t-t_0 )^+ + log(pop_t) + e_t
+    # Y_t is the number of IPD cases observed in year t
+    # pop_t is the population size in 100,000s in year t
+    # t_0 is the last year (7th year) of the pre-period (including the transition time if there is any)
+    # δ(x) is the indicator function (it is 0 if x≤0 and 1 if x>0) 
+    # (x)^+ is the cut off operator (it is x if x>0 and 0 otherwise)
+    # e_t denotes the residual
+#  Therefore β_2*δ(t-t_0) + β_3*(t-t_0 )^+ is generalised linear part of post-period 
+    #  which is zero in the pre-period. 
+#  The estimates of β_2 and β_3 will denote the effects of the intervention. 
+#  More periods/terms can be added to control for seasonality.
+
+
+## join the intervention weeks to the dataset by project 
+patient_counts <- left_join(patient_counts, intervention_weeks, by = "project")
+
+
+## define variables for regression 
+patient_counts <- patient_counts %>% 
+  group_by_key() %>% 
+  mutate(
+    ## corresponds to t in the formula
+      ## count of weeks (could probably also just use straight epiweeks var)
+    linear = row_number(epiweek), 
+    ## corresponds to delta(t-t0) in the formula
+      ## pre or post covid period
+    intervention = as.numeric(epiweek >= confirmed_region), 
+    ## corresponds to (t-t0)^+ in the formula
+      ## count of weeks post intervention
+      ## (choose the larger number between 0 and whatever comes from calculation)
+    time_post = pmax(0, epiweek - confirmed_region + 1))
+
+
+## define fourier terms (sincos) 
+patient_counts$fourier <- purrr::map(
+  ## for each of the projects
+  projects,
+  ## run fourier (subsetting data appropriately)
+  function(i) {
+    ## only keep the relevant columns and project
+    forecast::fourier(
+      filter(patient_counts, project == i) %>% 
+        select(epiweek, total),
+      ## choose number of sincos terms to include
+      2
+    )
+  }) %>%
+  ## bind together a list (bind_rows doesnt work because cols not named)
+  do.call(rbind, .)
+
+
+## fit a negative binomial model using data from 2019 and earlier 
+## include trend as well as seasonal fourier terms
+nbreg <- patient_counts %>% 
+  as_tibble() %>% 
+  group_by(project) %>% 
+  nest() %>% 
+  mutate(fit = purrr::map(data, 
+                          ~ MASS::glm.nb(total ~ linear + 
+                                           fourier + intervention + time_post+ 
+                                           offset(log(population)), 
+                                       data = .)))
+                          
+
+## Need to change population to be 1 for prediction (this way returns rate)
+nbreg <- nbreg %>% 
+  ## within the nested list loop over the data frames for each project
+  mutate(data = purrr::map(data, 
+                           ## within each dataframe, change population to be 1
+                           ~mutate(.x, 
+                                   population = 1)))
+
+## use the regression to forecast and calculate appropriate prediction intervals
+patient_counts <- nbreg %>% 
+  mutate(
+       ## Use predict to get fitted values for rate 
+       fitted = purrr::map2(.x = fit, .y = data, 
+                    .f = ~predict(.x, .y, type = "response")), 
+       ## calculate lower and upper PI (at 95% alpha = 0.5) [taken from Dirk Schumacher in {Trendbreaker}]
+       CI95_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.5 / 2, mu = .x, size = .y)), 
+       CI95_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.5 / 2, mu = .x, size = .y)),
+       ## calculate lower and upper PI (at 99% alpha = 0.1)
+       CI99_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.1 / 2, mu = .x, size = .y)), 
+       CI99_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.1 / 2, mu = .x, size = .y))
+       ) %>% 
+    ## keep data and newly created columns 
+    select(project, data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL) %>% 
+    ## pull back together in to one data frame 
+    unnest(c(data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL))
+
+## set population back to what it was 
+patient_counts <- patient_counts %>% 
+  mutate(## create a population per 10,000 variable 
+         population = beds / 10000
+         )
+
+```
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// overall_patient_impact_table \\\
+--------------------------------------------------------------------------------
+
+This chunk creates a table from the regression run above 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r overall_patient_impact_table, eval = include_tsa}
+
+# exponentiate results for IRRs and then pull bits out to get percentage change
+nbreg %>% 
+  ## use broom to exponentiate terms and get confidence interval 
+  mutate(outputs = purrr::map(.x = fit, 
+                              .f = ~broom::tidy(.x, 
+                                                exponentiate = TRUE,
+                                                conf.int = TRUE))) %>% 
+  ## only keep project and the data frame with exponentiated results
+  select(project, outputs) %>% 
+  ## pull out of list in to a dataframe 
+  unnest(cols = c(outputs)) %>% 
+  ## only keep the intervention value 
+  filter(term == "intervention") %>% 
+  ## change the IRR to percentage change for estimate and CIs 
+  mutate_at(vars(estimate, conf.low, conf.high), .f = function(i) 100 * (i - 1)) %>% 
+  ## only keep (and rename) certain columns 
+  select(Project = project, 
+         "Percentage change" = estimate, 
+         "95%CI low" = conf.low, 
+         "95%CI high" = conf.high, 
+         "p-value" = p.value) %>% 
+  ## show as a formatted table in the output
+  flextable::flextable() %>% 
+  ## select number of digits want in different columns 
+  flextable::colformat_num(j = c("Percentage change", "95%CI low", "95%CI high"),
+                           digits = 1) %>% 
+  flextable::colformat_num(j = c("p-value"), digits = 3) %>% 
+  autofit() %>% 
+  set_caption("Percentage change in patient rates")
+
+```
+
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// overall_patient_impact_plot \\\
+--------------------------------------------------------------------------------
+
+This chunk creates a plot from the regression run above 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r overall_patient_impact_plot, fig.cap = "Segmented regression showing change in patient counts by week"}
+
+
+## define the height that want to use for text labels
+height <- patient_counts %>% 
+  ## for each project
+  group_by(project) %>% 
+  ## find the highest peak out of all projects
+  summarise(height = max(rate_int)) %>% 
+  ## take 3/4s of that 
+  summarise(max(height) * 0.75) %>% 
+  ## return the value
+  pull()
+
+
+
+## define the appropriate y-axis label
+unit_lable <- if_else(admissions_based, 
+                      "Admissions (n/10,000 beds)", 
+                      "Discharges (n/10,000 beds)")
+
+## plot cases and fits with confidence intervals
+ggplot() +
+  ## plot for each project row-wise
+  facet_grid(project ~ .) +
+  
+  ## plot interpolated observed values as line - label observed (colour defined later)
+  geom_line(data = patient_counts, aes(x = as.Date(epiweek), group = intervention, 
+                                       y = rate_int, colour = "Observed")) +
+  
+  ## add in dhis2 start date line and label
+  geom_vline(data = filter(timelines, event == "Covid region"),
+             aes(xintercept = as.Date(calendar_week)),
+             linetype = 2, colour = "red") +
+
+  geom_label(data = filter(timelines, event == "Covid region"),
+            aes(x = as.Date(calendar_week),
+                y = height,
+                label = "Covid-19")) + 
+  
+
+  ## plot 95% prediction intervals as a ribbon - alpha sets transparency
+  geom_ribbon(data = patient_counts, 
+              aes(x = as.Date(epiweek), group = intervention, 
+                  ymin = CI95_LL, ymax = CI95_UL, alpha = "95% PI"), fill = "grey60") +
+  ## plot 99% prediction intervals as a ribbon - alpha sets transparency
+  geom_ribbon(data = patient_counts, 
+              aes(x = as.Date(epiweek), group = intervention, 
+                  ymin = CI99_LL, ymax = CI99_UL, alpha = "99% PI"), fill = "grey60") +
+  
+  ## plot modelled values as a line
+  geom_line(data = patient_counts, 
+            aes(x = as.Date(epiweek), group = intervention, 
+                y = fitted, colour = "Fitted")) +
+  ## set the colours for defined parts (match names to colours)
+  scale_colour_manual(values = c("Observed" = "black",
+                                 "Fitted" = "blue")) +
+  scale_alpha_manual(values = c("95% PI" = 0.4,
+                                "99% PI" = 0.2)) +
+  ## reverse the order of the legend
+  guides(colour = guide_legend(reverse = TRUE)) +
+  ## make y and x axes meet at the origin (x = 0, y = 0)
+  scale_y_continuous(expand = c(0,0), limits = c(0, NA)) +
+  ## label the axes appropriately and remove legend titles
+  labs(x = week_lable, y = unit_lable,
+       colour = element_blank(), alpha = element_blank()) +
+  ## add in theme and axis labels
+  tsa_axes +
+  tsa_theme
+```
+
+
+\newpage 
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// disease_specific_impact \\\
+--------------------------------------------------------------------------------
+
+This chunk is to fit a segmented regression on the overall patient counts. 
+It produces a table with percentage change and plots rates with segmented fit. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r disease_specific_impact, eval = include_tsa}
+
+
+## In general, the negative binomial regression model can be written as follows.
+# log(Y_t)= β_0 + β_1*t+ β_2*δ(t-t_0) + β_3*(t-t_0 )^+ + log(pop_t) + e_t
+    # Y_t is the number of IPD cases observed in year t
+    # pop_t is the population size in 100,000s in year t
+    # t_0 is the last year (7th year) of the pre-period (including the transition time if there is any)
+    # δ(x) is the indicator function (it is 0 if x≤0 and 1 if x>0) 
+    # (x)^+ is the cut off operator (it is x if x>0 and 0 otherwise)
+    # e_t denotes the residual
+#  Therefore β_2*δ(t-t_0) + β_3*(t-t_0 )^+ is generalised linear part of post-period 
+    #  which is zero in the pre-period. 
+#  The estimates of β_2 and β_3 will denote the effects of the intervention. 
+#  More periods/terms can be added to control for seasonality and population
+
+
+
+## join the intervention weeks to the dataset by project 
+cases <- left_join(cases, intervention_weeks, by = "project")
+
+## define variables for regression 
+cases <- cases %>% 
+  group_by_key() %>% 
+  mutate(
+    # corresponds to t in the formula
+      # count of weeks (could probably also just use straight epiweeks var)
+    linear = row_number(epiweek), 
+    # corresponds to delta(t-t0) in the formula
+      # pre or post covid period
+    intervention = as.numeric(epiweek >= confirmed_region), 
+    # corresponds to (t-t0)^+ in the formula
+      # count of weeks post intervention
+    time_post = pmax(0, epiweek - confirmed_region + 1))
+
+
+## drop hiv related because hardly any cases 
+cases <- filter(cases, disease != "HIV related")
+
+
+
+## drop balukhali in bangladesh 
+if (z == "Bangladesh") {
+  cases <- filter(cases, project != "Balukhali" & 
+                    disease != "Malaria")
+  
+  projects <- projects[!projects %in% "Balukhali"]
+}
+
+
+## drop diarrhoea for DRC south kivu 
+if (z == "DRC South Kivu") {
+  cases <- filter(cases, disease != "Diarrhoea")
+}
+
+
+## drop diarrhoea and TB for Nigeria 
+if (z == "Nigeria") {
+  cases <- filter(cases, !disease %in% c("Diarrhoea", "TB", "Chronic diseases"))
+}
+
+## drop tb in pakistan 
+if (z == "Pakistan") {
+  cases <- filter(cases, !disease %in% c("TB"))
+}
+
+
+
+
+
+
+
+## define fourier terms (sincos) 
+cases$fourier <- purrr::map(
+    ## for each of the projects
+    projects, function(.x) {
+      ## within each project do for each disease 
+           map(unique(cases$disease), function (.y) {
+               ## run fourier (subsetting data appropriately)
+             forecast::fourier(
+               ## only keep the relevant columns and project
+               filter(cases, project == .x & disease == .y) %>% 
+                 select(epiweek, total),
+               ## choose number of sincos terms to include
+               2
+               )
+           })}) %>% 
+  ## pull diseases specific datasets out of project specific lists 
+  flatten() %>% 
+  ## bind together a list (bind_rows doesnt work because cols not named)
+  do.call(rbind, .)
+
+
+## fit a negative binomial model using data from 2019 and earlier 
+## include trend as well as seasonal fourier terms
+nbreg <- cases %>% 
+  as_tibble() %>% 
+  group_by(project, disease) %>% 
+  nest() %>% 
+  mutate(fit = purrr::map(data, 
+                          ~ MASS::glm.nb(total ~ linear + fourier + 
+                                           intervention + time_post + 
+                                           offset(log(population)), 
+                                       data = .)))
+                          
+
+## Need to change population to be 1 for prediction (this way returns rate)
+nbreg <- nbreg %>% 
+  ## within the nested list loop over the data frames for each project
+  mutate(data = purrr::map(data, 
+                           ## within each dataframe, change population to be 1
+                           ~mutate(.x, 
+                                   population = 1)))
+
+## use the regression to forecast and calculate appropriate prediction intervals
+cases <- nbreg %>% 
+  mutate(
+       ## Use predict to get fitted values for rate 
+       fitted = purrr::map2(.x = fit, .y = data, 
+                    .f = ~predict(.x, .y, type = "response")), 
+       ## calculate lower and upper PI (at 95% alpha = 0.5) [taken from Dirk Schumacher in {Trendbreaker}]
+       CI95_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.5 / 2, mu = .x, size = .y)), 
+       CI95_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.5 / 2, mu = .x, size = .y)),
+       ## calculate lower and upper PI (at 99% alpha = 0.1)
+       CI99_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                      .f = ~qnbinom(0.1 / 2, mu = .x, size = .y)), 
+       CI99_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
+                             .f = ~qnbinom(1 - 0.1 / 2, mu = .x, size = .y))
+       ) %>% 
+    ## keep data and newly created columns 
+    select(project, disease, data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL) %>% 
+    ## pull back together in to one data frame 
+    unnest(c(data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL))
+
+
+## set population back to what it was 
+cases <- cases %>% 
+  mutate(## create a population per 10,000 variable 
+         population = patients / 10000
+         )
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// disease_specific_impact_table \\\
+--------------------------------------------------------------------------------
+
+This chunk creates a table from the regression run above 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r disease_specific_impact_table, eval = include_tsa}
+
+# exponentiate results for IRRs and then pull bits out to get percentage change
+nbreg %>% 
+  ## use broom to exponentiate terms and get confidence interval 
+  mutate(outputs = purrr::map(.x = fit, 
+                              .f = ~broom::tidy(.x, 
+                                                exponentiate = TRUE,
+                                                conf.int = TRUE))) %>% 
+  ## only keep project and the data frame with exponentiated results
+  select(project, disease, outputs) %>% 
+  ## pull out of list in to a dataframe 
+  unnest(cols = c(outputs)) %>% 
+  ## only keep the intervention value 
+  filter(term == "intervention") %>% 
+  ## change the IRR to percentage change for estimate and CIs 
+  mutate_at(vars(estimate, conf.low, conf.high), .f = function(i) 100 * (i - 1)) %>% 
+  ## only keep (and rename) certain columns 
+  select(Project = project, 
+         Disease = disease, 
+         "Percentage change" = estimate, 
+         "95%CI low" = conf.low, 
+         "95%CI high" = conf.high, 
+         "p-value" = p.value) %>% 
+  ## show as a formatted table in the output
+  flextable::flextable() %>% 
+  ## select number of digits want in different columns 
+  flextable::colformat_num(j = c("Percentage change", "95%CI low", "95%CI high"),
+                           digits = 1) %>% 
+  flextable::colformat_num(j = c("p-value"), digits = 3) %>% 
+  autofit() %>% 
+  set_caption("Percentage change in disease specific rates")
+
+```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// disease_specific_impact_plot \\\
+--------------------------------------------------------------------------------
+
+This chunk creates a plot from the regression run above 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r disease_specific_impact_plot, fig.cap = "Segmented regression showing change in disease specific rates by week"}
+
+## define the appropriate y-axis label
+unit_lable <- if_else(admissions_based, 
+                      "Disease admissions (n/10,000 admissions)", 
+                      "Disease discharges (n/10,000 discharges)")
+
+## loop over projects to produce faceted plots for each (otherwise too big for word doc)
+## walk is the same as map but does it quietly (doesnt show list number in output)
+purrr::walk(projects, ~ print(
+    ## plot cases and fits with confidence intervals
+    ggplot(filter(cases, project == .x), aes(x = as.Date(epiweek), group = intervention)) +
+      ## plot for each project row-wise
+      facet_grid(project + disease ~ ., scales = "free_y") +
+      ## plot 95% prediction intervals as a ribbon - alpha sets transparency
+      geom_ribbon(aes(ymin = CI95_LL, ymax = CI95_UL, alpha = "95% PI"), fill = "grey69") +
+      ## plot 99% prediction intervals as a ribbon - alpha sets transparency
+      geom_ribbon(aes(ymin = CI99_LL, ymax = CI99_UL, alpha = "99% PI"), fill = "grey60") +
+      ## plot interpolated observed values as line - label observed (colour defined later)
+      geom_line(aes(y = rate_int, colour = "Observed")) +
+      ## plot modelled values as a line
+      geom_line(aes(y = fitted, colour = "Fitted")) +
+      ## set the colours for defined parts (match names to colours)
+      scale_colour_manual(values = c("Observed" = "grey60",
+                                     "Fitted" = "blue")) +
+      scale_alpha_manual(values = c("95% PI" = 0.4,
+                                    "99% PI" = 0.2)) +
+      ## reverse the order of the legend
+      guides(colour = guide_legend(reverse = TRUE)) +
+      ## make y and x axes meet at the origin (x = 0, y = 0)
+      scale_y_continuous(expand = c(0,0), limits = c(0, NA)) +
+      ## label the axes appropriately and remove legend titles
+      labs(x = week_lable, y = unit_lable,
+           colour = element_blank(), alpha = element_blank()) +
+      ## add in theme and axis labels
+      tsa_axes +
+      tsa_theme
+  )
+)
+```
+
+\newpage
+
+# Appendix 
+
+## Technical details
+
+The methods used here have been explained in detail elsewhere [@hyndmann_forecasting_2019; @salmon_monitoring_2016], 
+the below is a brief summary of techniques. 
+
+**Data sources** 
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// wards_included \\\
+--------------------------------------------------------------------------------
+
+This chunk pulls together a sentence on whether maternal and ITFC wards were 
+included in the analysis. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r wards_included}
+
+wards_included <- if_else(medical_wards == "Medical", 
+                          "This analysis only considered medical wards (not including maternal or inpatient therapeutic feeding centers)", 
+                          "This analysis considered all medical wards (including maternal or inpatient therapeutic feeding centers)")
+
+```
+
+`r wards_included`. The various data sources used are listed below. 
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// data_source_dates \\\
+--------------------------------------------------------------------------------
+
+This chunk lists out the data sources by project and which dates these 
+sources were used between. 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r data_source_dates}
+
+## using the cleaned IPD data
+clean_data %>% 
+  ## do by project and data source type
+  group_by(project, source) %>% 
+  ## get the beginning and end of each source reporting
+  summarise(Start = min(calendar_week, na.rm = TRUE), 
+            Stop  = max(calendar_week, na.rm = TRUE)) %>% 
+  ## capitalise var names
+  rename(Project = project, 
+         Source = source) %>% 
+  ## show as a formatted table in the output
+  flextable() %>% 
+  autofit() %>% 
+  set_caption("Time periods which data sources were used by project")
+```
+
+
+
+**Data preparation**  
+
+Given the variation in project activities over time, we present rates per 10,000
+patient discharges rather than counts, as below: 
+
+$rate_{cases} = \frac{n_{cases}}{ n_{discharge}} \times 10,000$
+
+For weeks where the total number of patients was less than ten, counts were set 
+to missing. 
+
+Where weeks were missing counts, linear interpolation was used to fill these
+gaps [@moritz_imputets_2017]. This involves fitting a line between the previous 
+and the next available non-missing values, and then filling in the missing 
+values based on that line.   
+
+<!-- Note that the definition for chronic diseases between HIS tools and DHIS2 may be -->
+<!-- inconsistent. In the old excel based HIS tools - chronic diseases reported together -->
+<!-- with the following case definition:  -->
+<!-- This does not include all chronic disease, only the following:    -->
+
+<!--   - Diabetes Mellitus   -->
+<!--   - Ischaemic heart disease   -->
+<!--   - Hypertension   -->
+<!--   - Chronic respiratory disease  (includes COPD and asthma, but excludes TB)   -->
+<!--   - Epilepsy   -->
+
+<!-- In DHIS2 these are reported separately, and so the following options were  -->
+<!-- selected in order to try and match the old structure (for consistency over time):   -->
+
+<!--   - Chronic diseases     -->
+<!--   - Acute hypertensive crisis   -->
+<!--   - Acute cardiac events   -->
+<!--   - Acute complications of diabetes   -->
+<!--   - Chronic cardio & cerebrovascular disease    -->
+<!--   - Chronic complications of diabetes   -->
+<!--   - Non-infectious respiratory diseases - chronic    -->
+<!--   - Non-infectious respiratory disease - acute exacerbation   -->
+<!--   - Epilepsy   -->
+
+**Descriptive**  
+
+Classical decomposition was used [@hyndmann_forecasting_2019-1]. 
+This involves breaking down the time series in to its component parts in order 
+to understand whether there is a long-term upwards or downwards trend, whether 
+there are differences by season and if there are longer term cycles beyond seasons.  
+
+**Regression**  
+
+A baseline of expected case rates was created by fitting a negative binomial regression
+(generalised linear model) of case data between 2014 and 2019. 
+This regression included a term for the trend as well as the two best fitting 
+sine and cosine terms (using Fourier series) [@hyndmann_forecasting_2019-2]. 
+Two Fourier terms were used as there are some arguments for irregular LRTI seasonality 
+in warmer climates [@hirve_influenza_2016; @lam_nonannual_2018]. Where there is 
+no strong second peak, the second term does not substantially shift the fitted regression. 
+Fourier terms are calculated independently for each project and disease. 
+
+This regression model is then used to predict what the case rate will be in each 
+week of the following year. 
+It was also used to calculate 95% and 99% prediction intervals [@hyndmann_forecasting_2019-3]. 
+Prediction intervals were calculated based on quantiles of the binomial distribution
+for each fitted value [@jombart_r_2020]. 
+ 
+**Regression validation**  
+
+To validate how well the model performed, two things were done. 
+First, we looked at the differences between fitted values from the regression
+and the observed values (residuals) [@hyndmann_forecasting_2019-4]. In a 
+well-functioning model these residuals should be uncorrelated, of constant variance 
+with a mean of zero and normally distributed. 
+This just means that the fit should not be overly wrong at one particular time period 
+over another. 
+Second, we used time series cross validation [@hyndmann_forecasting_2019-5]. 
+This involves creating multiple subsets of your data and seeing how well the 
+model is able to predict four weeks ahead. 
+From this you can get several measures which tells you how accurate the model is 
+able to predict the observed values. 
+
+<!-- **Aberration methods**   -->
+
+<!-- We used the glrnb method for anomaly detection [@hohle_count_2008]. This was favoured -->
+<!-- over the Farrington method as it allows for inclusion of seasonal terms.  -->
+<!-- Similarly to the regression section, this also fits a negative binomial regression  -->
+<!-- including trend and two Fourier terms on the baseline data. The regression is used -->
+<!-- to calculate the "control mean" (~fitted values) - it then uses a computed  -->
+<!-- generalized likelihood ratio statistic to assess if there is shift in the mean  -->
+<!-- for each week.   -->
+<!-- Note that the threshold for each week takes in to account previous -->
+<!-- weeks; so if there is a sustained shift, the threshold for triggering an alarm is  -->
+<!-- lowered. This is why you may see a drop in the threshold the week after a large  -->
+<!-- peak.    -->
+<!-- Also note that after each alarm the algorithm is reset. This is why the threshold -->
+<!-- increases again after an alert is triggered.   -->
+<!-- *N.b.* For deaths - the threshold was set to correspond to a 50% increase from  -->
+<!-- the "control mean". [@wimmer_algoglrnb_nodate] -->
+
+**Segmented regression**  
+
+This uses negative binomial regression for interrupted time series analysis. 
+This regression included a term for the trend as well as the two best fitting 
+sine and cosine terms (using Fourier series) [@hyndmann_forecasting_2019-2]. On 
+top of this it includes terms for being pre- or post- intervention  and number of days 
+post-intervention.  
+In this case the first week with a confirmed Covid-19 case in the region for each
+project (or the nearest relevant region). 
+Effectively this fits two regressions (one pre, one post), which enables the 
+calculation of an incidence rate ratio (IRR). 
+From the IRR and 95%CI it is possible to calculate percentage change with the 
+formula below (where estimate is either IRR or CI). [@taljaard_use_2014]
+
+$\%\Delta = 100 \times (estimate - 1)$
+
+\newpage
+
+# References 
+
