@@ -59,7 +59,7 @@ recode_ipd <- function(x, chronic_defs = TRUE) {
 
 
   ## read in the dictionary to get dhis shortnames with corresponding dhis2 uids
-  dhis_shortnames <- rio::import(path = system.file("extdata",
+  dhis_shortnames <- rio::import(file = system.file("extdata",
                                              "cleaning_dict.xlsx",
                                              package = "epitsa"),
                                  sheet = "dhis_data_elements",
@@ -102,7 +102,7 @@ recode_ipd <- function(x, chronic_defs = TRUE) {
 
   ## arrange columns correctly
   x <- select(x,
-              generated_names,
+              all_of(generated_names),
               new_names_dict$`Attribute:shortName`,
               c("country",
                 "project",

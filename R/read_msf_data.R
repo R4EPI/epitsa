@@ -26,7 +26,7 @@
 #' @author Alex Spina
 #'
 #' @importFrom purrr map
-#' @importFrom dplyr bind_rows filter if_else mutate_at
+#' @importFrom dplyr bind_rows filter if_else across vars matches
 #' @importFrom stringr str_pad str_glue_data str_remove str_remove_all
 #' @importFrom aweek as.aweek
 #' @importFrom tsibble yearweek
@@ -44,7 +44,7 @@ read_msf_data <- function(country_folder, site,
                           wards = "Medical") {
 
   ## remove all text before forward slash to keep only the country
-  cntry <- str_remove(country_folder, ".+(\\/)")
+  cntry <- str_remove(country_folder, ".+(\\/)|.+(\\\\)")
 
 
   ############ Pull old his excel data together
@@ -139,7 +139,7 @@ read_msf_data <- function(country_folder, site,
 
 
       ## read in data dictionary
-      cleaning_dict <- rio::import(path =  system.file("extdata",
+      cleaning_dict <- rio::import(file =  system.file("extdata",
                                                        "cleaning_dict.xlsx",
                                                        package = "epitsa"),
                                    sheet = if_else(site == "IPD Beds", "IPD", site), trim_ws = FALSE)
@@ -181,7 +181,7 @@ read_msf_data <- function(country_folder, site,
 
       ## read in the IPD files
       intermediate_data <- purrr::map(dhis_project_paths,
-                                      function(k) rio::import(k, na = c("", "[99]"))
+                                      function(k) rio::import(k, na.strings = c("", "[99]"))
       )
 
       ## change variables to character (otherwise cant be merged)
@@ -210,9 +210,16 @@ read_msf_data <- function(country_folder, site,
       dhis_output$project <- dhis_output$organisation_unit
 
       ## change date variables to dates
-      dhis_output <- dplyr::mutate_at(dhis_output,
-                                      vars(matches("date|Date")),
-                                      as.Date)
+      dhis_output <- dplyr::mutate(dhis_output,
+                                   dplyr::across(
+                                     .cols = matches("date|Date"),
+                                     .fns = ~as.Date(
+                                         # gsub("", NA, .x)
+                                         .x
+                                       )
+                                     )
+                                   )
+
 
       ## add in variable for report year based on event date
       dhis_output$report_year <- as.numeric(format(dhis_output$event_date,
@@ -293,7 +300,7 @@ read_msf_data <- function(country_folder, site,
 
 
       ## read in the dictionary to get dhis shortnames with corresponding dhis2 uids
-      dhis_shortnames <- rio::import(path = system.file("extdata",
+      dhis_shortnames <- rio::import(file = system.file("extdata",
                                                         "cleaning_dict.xlsx",
                                                         package = "epitsa"),
                                      sheet = "dhis_data_elements",
@@ -404,7 +411,7 @@ read_msf_data <- function(country_folder, site,
       }
 
       ## read in data dictionary
-      cleaning_dict <- rio::import(path = system.file("extdata",
+      cleaning_dict <- rio::import(file = system.file("extdata",
                                                       "cleaning_dict.xlsx",
                                                       package = "epitsa"),
                                    sheet = if_else(site == "IPD Beds", "IPD", site), trim_ws = FALSE)

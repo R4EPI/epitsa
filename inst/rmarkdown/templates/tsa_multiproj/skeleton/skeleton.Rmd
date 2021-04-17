@@ -58,29 +58,31 @@ knitr::opts_chunk$set(echo = FALSE,      # hide all code chunks in output
                       tab.cap.sep = ": "
                       )
 
+##TODO delete unused packages
 
 ## Installing required packages for this template
-required_packages <- c("here",        # find your files
-                       "stringr",     # clean text
-                       "aweek",       # define epi weeks  
-                       "epitrix",     # epi helpers and tricks
-                       "MASS",        # for negative binomial regression (has to be loaded before dplyr)
-                       "dplyr",       # clean/shape data
-                       "tidyr",       # clean/shape data
-                       "rio",         # read in data
-                       "ggplot2",     # create plots and charts
-                       "tsibble",     # for time series plotting 
-                       "slider",      # for moving averages
-                       "feasts",      # for time series stats
-                       "fable",       # for time series forecasting
-                       "imputeTS",    # for filling in missing values
+required_packages <- c("here",          # find your files
+                       "stringr",       # clean text
+                       # "aweek",       # define epi weeks
+                       "epitrix",       # epi helpers and tricks
+                       # "MASS",        # for negative binomial regression (has to be loaded before dplyr)
+                       "dplyr",         # clean/shape data
+                       "tidyr",         # clean/shape data
+                       "rio",           # read in data
+                       "ggplot2",       # create plots and charts
+                       "tsibble",       # for time series plotting 
+                       "slider",        # for moving averages
+                       "feasts",        # for time series decomposition and autocorrelation
+                       "forecast",      # fit sin and cosin terms to data (note: must load after feasts)
+                       # "fable",       # for time series forecasting
+                       "imputeTS",      # for filling in missing values
                        "knitr",       # for making clean tables
-                       "flextable",   # for making clean tables
+                       "flextable",     # for making clean tables
                        # "citr",        # for adding references with zotero
-                       "yardstick",   # for model forecast performance estimates
-                       "surveillance", # for aberration methods 
-                       "officer",     # for formatting word output
-                       "officedown" # for formatting word output
+                       "yardstick",     # for model forecast performance estimates
+                       "surveillance",  # for aberration methods 
+                       "officer",       # for formatting word output
+                       "officedown"     # for formatting word output
                        )
                        
 for (pkg in required_packages) {
@@ -93,22 +95,30 @@ for (pkg in required_packages) {
   library(pkg, character.only = TRUE)
 }
 
-## read the script defining functions for pulling old HIS data
-source(here::here("Functions", "old_his_data_tools.R"))
 
-## read the script defining functions for recoding old HIS data
-source(here::here("Functions", "recode_old_his_data_tools.R"))
+## installing github packages for this template 
 
-## read the script defining functions for pulling bed counts (from his & DHIS2)
-source(here::here("Functions", "his_bed_tools.R"))
-
-## read the script defining functions for reading in datasets
-source(here::here("Functions", "read_msf_data.R")) 
-
-## read the script defining functions for tsa periodograms and fourier terms
-source(here::here("Functions", "tsa_utilities.R")) 
+## Installing required packages from github 
+git_packages <- c("epitsa"  # for msf data tools and tsa utilities
+                  )
+for (pkg in git_packages) {
+  
+  ## install packages if not already present from approrpriate repo
+  if (!pkg %in% rownames(installed.packages())) {
+    
+    if (pkg == "epitsa") {
+      remotes::install_github("R4EPI/epitsa")
+    }
+    
+  }
+  
+  ## load packages to this current session 
+  library(pkg, character.only = TRUE)
+}
 
 ```
+
+
 
 
 ```{r country_specific}
@@ -146,6 +156,8 @@ medical_wards <- if_else(z %in% c("Bangladesh", "South Sudan", "Nigeria",
                          "Medical extension")
 ```
 
+
+
 <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 /// date_levels \\\
 --------------------------------------------------------------------------------
@@ -155,6 +167,9 @@ It returns all the weeks in the period, in date and week format, separately.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
 
 ```{r date_levels}
+
+## TODO delete aweek
+## TODO move dat definers to control chunk
 
 ## define dates want to plot 
 
@@ -197,8 +212,6 @@ country folder.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
 
 ```{r country_folders}
-## specific country
-
 
 ## define the filepath
 file_path <- here::here("Data", "Processed", z)
@@ -445,7 +458,9 @@ level).
 ```{r timelines}
 
 ## pull timelines data
-timelines <- rio::import(here::here("Data", "timelines.xlsx"), 
+timelines <- rio::import(system.file("extdata", 
+                                     "timelines.xlsx", 
+                                     package = "epitsa"), 
                          which = "msf_info") %>% 
   ## filter to only keep country currently being run
   filter(country == z & project %in% projects)
