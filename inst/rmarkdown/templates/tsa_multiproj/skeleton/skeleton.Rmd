@@ -77,13 +77,14 @@ required_packages <- c("here",          # find your files
                        "forecast",      # fit sin and cosin terms to data (note: must load after feasts)
                        # "fable",       # for time series forecasting
                        "imputeTS",      # for filling in missing values
-                       "knitr",       # for making clean tables
+                       "knitr",         # for making clean tables
                        "flextable",     # for making clean tables
                        # "citr",        # for adding references with zotero
                        "yardstick",     # for model forecast performance estimates
                        "surveillance",  # for aberration methods 
                        "officer",       # for formatting word output
-                       "officedown"     # for formatting word output
+                       "officedown",    # for formatting word output
+                       "trending"       # for fitting regressions and forecasting
                        )
                        
 for (pkg in required_packages) {
@@ -185,7 +186,7 @@ end_date <- yearweek("2020-12-31")  ## using tsibble
 
 
 ## the surveillance cut off date (i.e. the end of baseline period)
-surveillance_date <- yearweek("2020-01-01")
+surveillance_date <- yearweek("2019-12-31")
 
 ## get a vector of all the dates in between 
 all_dates <- as.Date(start_date:end_date, origin = "1970-01-01") ## using base
@@ -198,6 +199,25 @@ all_weeks <- seq(start_date, end_date, by = 1) %>% factor()                  # u
 ## change weeks to dates 
 # all_epiweeks <- week2date(all_weeks)                          ## using aweek
 all_epiweeks <-  as.Date(seq(start_date, end_date, by = 1))     ## using tsibble
+
+
+## TODO abstract this so can be x number of years ahead! 
+
+## get the year which want to predict for 
+## add one week to cut_off (to push in to next year) and change to only have Year
+pred_year <- format(surveillance_date + 1, format = "%Y") %>% 
+  ## change to numeric
+  as.numeric()
+
+## find how many weeks in year of interest
+num_weeks <- ifelse(
+  ## true/false of whether pred_year is a 53 week year
+  is_53weeks(pred_year),
+  ## if true then return 53 
+  53, 
+  ## otherwise return 52
+  52)
+
 
 ```
 
@@ -1542,6 +1562,203 @@ pgram <- ggplot(data = periodo,
   tsa_theme
 
 ```
+
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// fourier_terms \\\
+--------------------------------------------------------------------------------
+
+This chunk creates variables for fourier terms using the counts (or rates) data. 
+The most appropriate weeks are selected by fourier series. These terms are then 
+used for seasonality in the next chunk. 
+For details on fourier series see links, as well as those in next chunk: 
+https://bookdown.org/rdpeng/timeseriesbook/the-fourier-transform.html
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r fourier_terms}
+
+## define fourier terms (sincos)
+fourier_terms <- purrr::map(
+  ## for each of the projects
+  projects,
+  ## run fourier (subsetting data appropriately)
+  function(i) {
+    ## combine fourier terms for weeks prior to  and after cut-off
+    ## Year of interest fourier terms are predicted
+    rbind(
+      ## get fourier terms for previous years
+            forecast::fourier(
+              filter(lrti_cases, 
+                     project == i, 
+                     epiweek < surveillance_date
+                     ) %>%  
+                select(epiweek, total),
+              ## choose number of sincos terms to include
+              K = 2
+              ), 
+            
+       ## forecast for year of interest
+            forecast::fourier(
+              filter(lrti_cases, 
+                     project == i, 
+                       epiweek < surveillance_date
+                     ) %>%  
+                select(epiweek, total),
+              ## choose number of sincos terms to include
+              K = 2, 
+              h = num_weeks
+              )
+            )
+  }) %>%
+  ## bind together a list (bind_rows doesnt work because cols not named)
+  do.call(rbind, .)
+
+
+## add in missing weeks till end of year 
+lrti_cases <- lrti_cases %>%
+  ## group by the project
+  group_by_key() %>%
+  ## for each group add rows from the highest epiweek to the end of year
+  group_modify(~add_row(.,
+                        epiweek = seq(max(.$epiweek) + 1, 
+                                      end_date,
+                                      by = 1)))
+
+## add fourier terms to dataset
+lrti_cases$fourier <- fourier_terms
+
+```
+
+<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/// sincos_tsa \\\
+--------------------------------------------------------------------------------
+
+This chunk fits a negative binomial regression to observed case data. 
+The model includes the trend (linear change over time) as well as
+two sine and cosine terms which account for seasonality. 
+The most appropriate weeks for cosine are selected by fourier series. 
+For details see: 
+https://fable.tidyverts.org/reference/common_xregs.html
+https://otexts.com/fpp3/useful-predictors.html
+https://bookdown.org/rdpeng/timeseriesbook/frequency-and-time-scale-analysis.html
+
+Prediction intervals are calculated manually for the fitted values of the model, 
+based on quantiles of the binomial distribution. 
+This means that at 95% alpha = 0.5 and at 99% alpha = 0.1.
+This is based off work in the {trending} package: 
+http://www.repidemicsconsortium.org/trending/index.html
+For details on prediction intervals: 
+https://otexts.com/fpp2/prediction-intervals.html 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
+
+```{r sincos_tsa}
+
+# split data for fitting and prediction
+dat <- lrti_cases %>% 
+  group_by(project, 
+           cut_off = epiweek < surveillance_date) %>%
+  nest()
+
+## define the model you want to fit (negative binomial) 
+model <- glm_nb_model(
+   ## set number of cases as outcome of interest
+   total ~ 
+    ## use epiweek to account for the trend
+    epiweek + 
+    ## use the furier terms to account for seasonality
+    fourier +
+    ## include the population as an offset (to make)
+    offset(log(population))
+)
+
+## fit the baseline model 
+dat <- dat %>% 
+  mutate(
+    fit = ifelse(
+      ## for data after the cut-off date (i.e. year of interest) set model to NA
+      ## (dont run a model)
+      !cut_off,
+      NA, 
+      ## for base line data fit the model defined above for each projects
+      purrr::map(data,
+               ~fit(model, .x)
+               )))
+
+## Need to change population to be 1 for prediction (this way returns rate)
+dat <- dat %>% 
+  ## within the nested list loop over the data frames for each project
+  mutate(data = purrr::map(data, 
+                           ## within each dataframe, change population to be 1
+                           ~mutate(.x, 
+                                   population = 1)))
+
+## use th models to get estimates and prediction intervals for each project
+observed <- list()
+
+for (i in unique(dat$project)) {
+  
+  
+  observed[[paste0(i, "_fitted")]] <- predict(dat$fit[dat$project == i & 
+                                                        dat$cut_off][[1]], 
+                                              dat$data[dat$project == i & 
+                                                         dat$cut_off][[1]])
+  
+  observed[[paste0(i, "_predicted")]] <- predict(dat$fit[dat$project == i & 
+                                                           dat$cut_off][[1]], 
+                                                 dat$data[dat$project == i & 
+                                                            !dat$cut_off][[1]])
+  
+  observed[[paste0(i, "_fitted")]]$project <- i
+  observed[[paste0(i, "_predicted")]]$project <- i
+  
+}
+
+observed <- bind_rows(observed)
+
+# dat <- dat %>% 
+#   mutate(estimates = 
+#            ifelse(
+#              cut_off, 
+#              purrr::map2(.x = fit, .y = data, 
+#                         ~predict(.x, .y)), 
+#              purrr::map2(.x = fit, .y = data,
+#                ~predict(lag(.x), .y)
+#              )
+#          ))
+#              
+# ## retrieve outputs in a single dataframe             
+# observed <- dat %>% 
+#   unnest(estimates)
+
+# define which data to use for fitting and which for predicting
+fitting_data <- pluck(dat, 2)
+pred_data <- pluck(dat, 1) %>% 
+  select(total, epiweek, fourier, population) %>% 
+  mutate(population = 1)
+
+# fit model 
+fitted_model <- fit(model, fitting_data)
+
+# get confint and estimates for fitted data
+observed <- fitted_model %>% 
+  predict(mutate(fitting_data, 
+                 population = 1))
+
+# forecast with data want to predict with 
+forecasts <- fitted_model %>% 
+  predict(pred_data)
+
+## combine baseline and predicted datasets
+observed <- bind_rows(observed, forecasts)
+
+
+
+
+```
+
+
+
+
 
 
 <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
