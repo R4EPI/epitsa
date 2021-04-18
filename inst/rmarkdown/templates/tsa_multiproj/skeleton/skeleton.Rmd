@@ -68,6 +68,7 @@ required_packages <- c("here",          # find your files
                        # "MASS",        # for negative binomial regression (has to be loaded before dplyr)
                        "dplyr",         # clean/shape data
                        "tidyr",         # clean/shape data
+                       "purrr",         # for iterating over projects 
                        "rio",           # read in data
                        "ggplot2",       # create plots and charts
                        "tsibble",       # for time series plotting 
@@ -1656,7 +1657,7 @@ https://qiushi.rbind.io/fpp/evaluating-a-regression-model.html
 ## pull together the residuals in a dataframe
 resid_dat <- nbreg %>% 
   ## get the predictions and residuals in the same scale as counts used to fit model
-  mutate(origpred = map(.x = fit, ~ broom::augment(.x, 
+  mutate(origpred = purrr::map(.x = fit, ~ broom::augment(.x, 
                                             type.predict = "response", 
                                             type.residuals = "response"))) %>% 
   ## pull the dataset of counts and residuals out of list 
