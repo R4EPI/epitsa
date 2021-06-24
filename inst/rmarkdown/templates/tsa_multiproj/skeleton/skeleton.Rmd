@@ -2027,6 +2027,11 @@ https://twitter.com/ucfagls/status/1281655700163194881
 
 ```{r aberration_methods, eval = (include_tsa * include_aberration) == 1}
 
+## TODO: include a switch in control chunk to define method ("farrington" / "glrnb") 
+  ## then use if statement to define - apply and store in object called algo_method
+  ## then only need one line to incorporate in to observed dataframe (outside of if{})
+
+
 for (i in projects) {
   
   ## define surveillance time series object
@@ -2059,15 +2064,17 @@ for (i in projects) {
   #              ## pastWeeksNotIncluded = 3, ## use all weeks available (noufaily suggests drop 26)
   #              trend = TRUE,
   #              pThresholdTrend = 1, ## 0.05 normally, however 1 is advised in the improved method (i.e. always keep)
-  #              thresholdMethod = "nbPlugin", 
+  #              thresholdMethod = "nbPlugin",
   #              populationOffset = TRUE
   #              )
   # ## apply farrington flexible method
-  # farringtonmethod <- farringtonFlexible(lrti_sts, ctrl, verbose = FALSE)
+  # farringtonmethod <- farringtonFlexible(lrti_sts, ctrl)
   # 
   # ## add farrington threshold to dataset
-  # lrti_cases[which(lrti_cases$project == i &
-  #                       lrti_cases$epiweek >= surveillance_date),
+  # observed[which(observed$project == i &
+  #                       observed$epiweek >= surveillance_date &
+  #                    ## have to drop the added empty rows
+  #                    !is.na(observed$rate_int)),
   #               "threshold"] <- farringtonmethod@upperbound
   
   
@@ -2097,7 +2104,7 @@ for (i in projects) {
 
   ## add glrnb threshold to dataset
   observed[which(observed$project == i &
-                        observed$epiweek >= surveillance_date & 
+                        observed$epiweek >= surveillance_date &
                      ## have to drop the added empty rows
                      !is.na(observed$rate_int)),
                 "threshold"] <- glrnbmethod@upperbound
