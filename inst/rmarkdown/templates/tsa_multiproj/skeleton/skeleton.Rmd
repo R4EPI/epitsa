@@ -98,25 +98,27 @@ for (pkg in required_packages) {
 }
 
 
+## TODO uncomment this section (shouldnt have to be installed in theory but whatever)
+
 ## installing github packages for this template 
 
 ## Installing required packages from github 
-git_packages <- c("epitsa"  # for msf data tools and tsa utilities
-                  )
-for (pkg in git_packages) {
-  
-  ## install packages if not already present from approrpriate repo
-  if (!pkg %in% rownames(installed.packages())) {
-    
-    if (pkg == "epitsa") {
-      remotes::install_github("R4EPI/epitsa")
-    }
-    
-  }
-  
-  ## load packages to this current session 
-  library(pkg, character.only = TRUE)
-}
+# git_packages <- c("epitsa"  # for msf data tools and tsa utilities
+#                   )
+# for (pkg in git_packages) {
+#   
+#   ## install packages if not already present from approrpriate repo
+#   if (!pkg %in% rownames(installed.packages())) {
+#     
+#     if (pkg == "epitsa") {
+#       remotes::install_github("R4EPI/epitsa")
+#     }
+#     
+#   }
+#   
+#   ## load packages to this current session 
+#   library(pkg, character.only = TRUE)
+# }
 
 ```
 
@@ -124,8 +126,11 @@ for (pkg in git_packages) {
 
 
 ```{r country_specific}
+
+## TODO fix so that defining a z not necessary lower down?
+
 ## specific country
-#z <- "Pakistan"
+z <- "DRC North Kivu"
 ```
 
 <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -170,54 +175,33 @@ It returns all the weeks in the period, in date and week format, separately.
 
 ```{r date_levels}
 
-## TODO delete aweek
-## TODO move dat definers to control chunk
-
 ## define dates want to plot 
 
 ## the first date interested in
-# start_date <- week2date("2014-W01") ## using aweek
 start_date <- yearweek("2014 W01")    ## using tsibble 
 
+## the surveillance cut off date (i.e. end of baseline, start of prediction period)
+surveillance_date <- yearweek("2019-12-31")
 
-## the last date interested in
-# end_date <- as.Date("2020-12-31") ## using aweek
+## the last date interested in (i.e. end of prediction)
 end_date <- yearweek("2020-12-31")  ## using tsibble 
 
 
-## the surveillance cut off date (i.e. the end of baseline period)
-surveillance_date <- yearweek("2019-12-31")
+## find how many weeks in period (year) of interest
+num_weeks <- as.numeric(end_date - surveillance_date)
+
+
+## define seqeuence of all weeks to label axes in plots 
 
 ## get a vector of all the dates in between 
 all_dates <- as.Date(start_date:end_date, origin = "1970-01-01") ## using base
 
 
 ## pull the unique weeks which occur 
-# all_weeks <- levels(date2week(all_dates, floor_day = TRUE, factor = TRUE)) # using aweek
-all_weeks <- seq(start_date, end_date, by = 1) %>% factor()                  # using tsibble
+all_weeks <- seq(start_date, end_date, by = 1) %>% factor()     ## using tsibble
 
 ## change weeks to dates 
-# all_epiweeks <- week2date(all_weeks)                          ## using aweek
 all_epiweeks <-  as.Date(seq(start_date, end_date, by = 1))     ## using tsibble
-
-
-## TODO abstract this so can be x number of years ahead! 
-
-## get the year which want to predict for 
-## add one week to cut_off (to push in to next year) and change to only have Year
-pred_year <- format(surveillance_date + 1, format = "%Y") %>% 
-  ## change to numeric
-  as.numeric()
-
-## find how many weeks in year of interest
-num_weeks <- ifelse(
-  ## true/false of whether pred_year is a 53 week year
-  is_53weeks(pred_year),
-  ## if true then return 53 
-  53, 
-  ## otherwise return 52
-  52)
-
 
 ```
 
@@ -234,8 +218,13 @@ country folder.
 
 ```{r country_folders}
 
+##TODO delete static filepath (and uncomment below)
+
+file_path <- paste0("C:\\Users\\Spina\\Desktop\\TSA_covid19\\Data\\Processed\\", z)
+
+
 ## define the filepath
-file_path <- here::here("Data", "Processed", z)
+# file_path <- here::here("Data", "Processed", z)
 
 ```
 
@@ -1491,7 +1480,7 @@ cases <- cases %>%
          )
 
 ## to check what values have been imputed compared to the original
-# imputeTS::plotNA.imputations(cases$rate, cases$rate_int)
+# imputeTS::ggplot_na_imputations(cases$rate, cases$rate_int)
 
 
 ## only keep lrti cases 
@@ -1564,6 +1553,7 @@ pgram <- ggplot(data = periodo,
 ```
 
 
+
 <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 /// fourier_terms \\\
 --------------------------------------------------------------------------------
@@ -1590,7 +1580,7 @@ fourier_terms <- purrr::map(
             forecast::fourier(
               filter(lrti_cases, 
                      project == i, 
-                     epiweek < surveillance_date
+                     epiweek <= surveillance_date
                      ) %>%  
                 select(epiweek, total),
               ## choose number of sincos terms to include
@@ -1601,7 +1591,7 @@ fourier_terms <- purrr::map(
             forecast::fourier(
               filter(lrti_cases, 
                      project == i, 
-                       epiweek < surveillance_date
+                       epiweek <= surveillance_date
                      ) %>%  
                 select(epiweek, total),
               ## choose number of sincos terms to include
@@ -1653,7 +1643,7 @@ https://otexts.com/fpp2/prediction-intervals.html
 
 ```{r sincos_tsa}
 
-# split data for fitting and prediction
+## split data for fitting and prediction
 dat <- lrti_cases %>% 
   group_by(project, 
            cut_off = epiweek < surveillance_date) %>%
@@ -1692,164 +1682,41 @@ dat <- dat %>%
                            ~mutate(.x, 
                                    population = 1)))
 
-## use th models to get estimates and prediction intervals for each project
+## use the models to get estimates and prediction intervals for each project
 observed <- list()
 
+## for each project 
 for (i in unique(dat$project)) {
   
-  
+  ## get the prediction intervals for the baseline period 
+  ## use the regression n
   observed[[paste0(i, "_fitted")]] <- predict(dat$fit[dat$project == i & 
                                                         dat$cut_off][[1]], 
                                               dat$data[dat$project == i & 
-                                                         dat$cut_off][[1]])
+                                                         dat$cut_off][[1]], 
+                                              simulate_pi = FALSE)
   
-  observed[[paste0(i, "_predicted")]] <- predict(dat$fit[dat$project == i & 
+  ## get the prediction intervals for the forecast period (year of interest)
+  observed[[paste0(i, "_predicted")]] <- predict(
+                                                ## use the model defined 
+                                                ## on baseline data
+                                                dat$fit[dat$project == i & 
                                                            dat$cut_off][[1]], 
+                                                ## predict based on data (fourier) 
+                                                ## from the prediction period
                                                  dat$data[dat$project == i & 
-                                                            !dat$cut_off][[1]])
+                                                            !dat$cut_off][[1]], 
+                                                simulate_pi = FALSE)
   
+  ## store the output of the baseline period
   observed[[paste0(i, "_fitted")]]$project <- i
+  ## store the output of the predicted perio 
   observed[[paste0(i, "_predicted")]]$project <- i
   
 }
 
+## combine the outputs in to one data frame 
 observed <- bind_rows(observed)
-
-# dat <- dat %>% 
-#   mutate(estimates = 
-#            ifelse(
-#              cut_off, 
-#              purrr::map2(.x = fit, .y = data, 
-#                         ~predict(.x, .y)), 
-#              purrr::map2(.x = fit, .y = data,
-#                ~predict(lag(.x), .y)
-#              )
-#          ))
-#              
-# ## retrieve outputs in a single dataframe             
-# observed <- dat %>% 
-#   unnest(estimates)
-
-# define which data to use for fitting and which for predicting
-fitting_data <- pluck(dat, 2)
-pred_data <- pluck(dat, 1) %>% 
-  select(total, epiweek, fourier, population) %>% 
-  mutate(population = 1)
-
-# fit model 
-fitted_model <- fit(model, fitting_data)
-
-# get confint and estimates for fitted data
-observed <- fitted_model %>% 
-  predict(mutate(fitting_data, 
-                 population = 1))
-
-# forecast with data want to predict with 
-forecasts <- fitted_model %>% 
-  predict(pred_data)
-
-## combine baseline and predicted datasets
-observed <- bind_rows(observed, forecasts)
-
-
-
-
-```
-
-
-
-
-
-
-<!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-/// sincos_tsa \\\
---------------------------------------------------------------------------------
-
-This chunk fits a negative binomial regression to observed case data. 
-The model includes the trend (linear change over time) as well as
-two sine and cosine terms which account for seasonality. 
-The most appropriate weeks for cosine are selected by fourier series. 
-For details see: 
-https://fable.tidyverts.org/reference/common_xregs.html
-https://otexts.com/fpp3/useful-predictors.html
-https://bookdown.org/rdpeng/timeseriesbook/frequency-and-time-scale-analysis.html
-
-Prediction intervals are calculated manually for the fitted values of the model, 
-based on quantiles of the binomial distribution. 
-This means that at 95% alpha = 0.5 and at 99% alpha = 0.1.
-This is based off work by Dirk Schumacher in the {trendbreaker} package: 
-https://github.com/reconhub/trendbreaker
-For details on prediction intervals: 
-https://otexts.com/fpp2/prediction-intervals.html 
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
-
-```{r sincos_tsa, eval = include_tsa}
-## define fourier terms (sincos) 
-lrti_cases$fourier <- purrr::map(
-  ## for each of the projects
-  projects,
-  ## run fourier (subsetting data appropriately)
-  function(i) {
-    ## only keep the relevant columns and project
-    forecast::fourier(
-      filter(lrti_cases, project == i) %>% 
-        select(epiweek, total),
-      ## choose number of sincos terms to include
-      2
-    )
-  }) %>%
-  ## bind together a list (bind_rows doesnt work because cols not named)
-  do.call(rbind, .)
-
-
-## fit a negative binomial model using data from 2019 and earlier 
-## include trend as well as seasonal fourier terms
-nbreg <- lrti_cases %>% 
-  as_tibble() %>% 
-  group_by(project) %>% 
-  nest() %>% 
-  mutate(fit = purrr::map(data, 
-                          ~ MASS::glm.nb(total ~ epiweek + fourier +
-                                           offset(log(population)), 
-                                       data = filter(., 
-                                      epiweek < surveillance_date))))
-
-## Need to change population to be 1 for prediction (this way returns rate)
-nbreg <- nbreg %>% 
-  ## within the nested list loop over the data frames for each project
-  mutate(data = purrr::map(data, 
-                           ## within each dataframe, change population to be 1
-                           ~mutate(.x, 
-                                   population = 1)))
-
-
-## use the regression to forecast and calculate appropriate prediction intervals
-lrti_cases <- nbreg %>% 
-  mutate(
-       ## Use predict to get fitted values for rate 
-       fitted = purrr::map2(.x = fit, .y = data, 
-                    .f = ~predict(.x, .y, type = "response")), 
-       ## calculate lower and upper PI (at 95% alpha = 0.5) [taken from Dirk Schumacher in {Trendbreaker}]
-       CI95_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                      .f = ~qnbinom(0.5 / 2, mu = .x, size = .y)), 
-       CI95_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                             .f = ~qnbinom(1 - 0.5 / 2, mu = .x, size = .y)),
-       ## calculate lower and upper PI (at 99% alpha = 0.1)
-       CI99_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                      .f = ~qnbinom(0.1 / 2, mu = .x, size = .y)), 
-       CI99_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                             .f = ~qnbinom(1 - 0.1 / 2, mu = .x, size = .y))
-       ) %>% 
-    ## keep data and newly created columns 
-    select(project, data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL) %>% 
-    ## pull back together in to one data frame 
-    unnest(c(data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL))
-
-## set population back to what it was 
-lrti_cases <- lrti_cases %>% 
-  mutate(## create a population per 10,000 variable 
-         population = patients / 10000
-         )
 
 ```
 
@@ -1871,36 +1738,30 @@ https://qiushi.rbind.io/fpp/evaluating-a-regression-model.html
 
 ```{r sincos_tsa_validation, eval = FALSE, , include = FALSE}
 
-## pull together the residuals in a dataframe
-resid_dat <- nbreg %>% 
-  ## get the predictions and residuals in the same scale as counts used to fit model
-  mutate(origpred = purrr::map(.x = fit, ~ broom::augment(.x, 
-                                            type.predict = "response", 
-                                            type.residuals = "response"))) %>% 
-  ## pull the dataset of counts and residuals out of list 
-  unnest(origpred) %>% 
-  ## drop extra data and fit (as these are already in the augmented dataset)
-  select(-data, -fit) %>% 
-  ## change to a tibble
-  as_tibble()
+
+## calculate the residuals 
+observed <- observed %>% 
+  mutate(resid = rate_int - estimate)
+
 
 ## are the residuals fairly constant over time (if not: outbreaks? change in practice?)
-res_plot1 <- resid_dat %>%
-  ggplot(aes(x = epiweek, y = .resid)) +
+res_plot1 <- observed %>%
+  ggplot(aes(x = epiweek, y = resid)) +
   facet_grid(project~.) +
   geom_line() +
   geom_point() + 
   labs(x = "epiweek", y = "Residuals")
 
+
 ## is there autocorelation in the residuals (is there a pattern to the error?)  
-res_plot2 <- resid_dat %>% 
-  as_tsibble(index = epiweek, key = project) %>% 
-  ACF(.resid, lag_max = 53) %>% 
+res_plot2 <- observed %>% 
+  as_tsibble(index = epiweek, key = project) %>%
+  ACF(resid, lag_max = 53) %>% 
   autoplot()
 
 ## are residuals normally distributed (are under or over estimating?)  
-res_plot3 <- resid_dat %>%
-  ggplot(aes(x = .resid)) +
+res_plot3 <- observed %>%
+  ggplot(aes(x = resid)) +
   facet_grid(project~.) +
   geom_histogram(binwidth = 100) +
   geom_rug() +
@@ -1908,15 +1769,22 @@ res_plot3 <- resid_dat %>%
   
 ## compare observed counts to their residuals 
   ## should also be no pattern 
-res_plot4 <- resid_dat %>%
-  ggplot(aes(x = .fitted, y = .resid)) +
+res_plot4 <- observed %>%
+  ggplot(aes(x = estimate, y = resid)) +
   facet_grid(project~.) +
   geom_point() +
   labs(x = "Fitted", y = "Residuals")
 
-## formally test autocorellation of the residuals [TODO: FIX]
+## formally test autocorrelation of the residuals
 ## H0 is that residuals are from a white-noise series (i.e. random)
-ljungbox <- fit_lm %>% augment() %>% features(.resid, ljung_box, lag = 10, dof = 5)
+## test for independence 
+## if p value significant then non-random
+ljungbox <- list()
+
+for(i in projects) {
+  ljungbox[[i]] <- Box.test(observed$resid[observed$project == i],
+                         type = "Ljung-Box")
+}
 
 ```
 
@@ -1960,10 +1828,10 @@ residuals with constant variance and normally distributed residuals.
 ## (creates longer and longer chains of observations - keeps older data)
 
 ## define window want to roll over
-roll_window <- 4
+roll_window <- 52
 
 ## define weeks ahead want to predict 
-weeks_ahead <- 4
+weeks_ahead <- 52
 
 
 ## do for each project 
@@ -1977,7 +1845,7 @@ purrr::map(
     case_roll <- lrti_cases %>% 
       filter(epiweek < surveillance_date & 
                project == i) %>% 
-      select(project, epiweek, disease, total, patients, rate_int) %>% 
+      select(project, epiweek, disease, total, patients, rate_int, population) %>% 
         ## drop the last x observations 
         ## depending on how many weeks ahead forecasting 
         ## (otherwise will be an actual forecast to "unknown")
@@ -2012,26 +1880,82 @@ purrr::map(
       ## add the forecast data to the original 
       mini_data <- bind_rows(mini_data, forecast_data)
       
-      ## fit fourier terms 
-       ## only keep the relevant columns 
-      mini_data$fourier <- forecast::fourier(select(mini_data, epiweek, rate_int) %>% 
-                                               ## turn back to a tsibble for fun to work
-                                               as_tsibble(index = epiweek),
-                                             ## choose number of sincos terms to include
-                                                    2)
+      ## define the cut off based on latest non missing count data 
+      cv_cut_off <- mini_data %>% 
+        ## only keep non-missing rows
+        drop_na(rate_int) %>% 
+        ## get the latest week
+        summarise(max(epiweek)) %>% 
+        ## extract so is not in a dataframe
+        pull()
       
-      ## fit a negative binomial with only those in the current fold
-      mini_nbreg <- MASS::glm.nb(rate_int ~ epiweek + fourier,
-                                 data = filter(mini_data, 
-                                               !is.na(.id)))
       
-      ## forecast ahead 
-      mini_data$fitted <- predict(mini_nbreg, mini_data, type = "response")
+      ## make mini_data back in to a tsibble
+      mini_data <- tsibble(mini_data, index = epiweek)
       
-      ## return only the forecast with the week 
-      filter(mini_data, is.na(.id)) %>% 
-        select(epiweek, fitted)
-        
+      
+      ## define fourier terms (sincos) 
+      mini_data <- mini_data %>% 
+       mutate(
+       ## combine fourier terms for weeks prior to  and after cut-off date
+       fourier = rbind(
+         ## get fourier terms for previous years
+         forecast::fourier(
+           ## only keep the rows before cut-off
+           filter(mini_data, 
+                  epiweek <= cv_cut_off) %>%  
+                select(epiweek, total), 
+           ## include one set of sin cos terms 
+           K = 1
+           ), 
+         ## predict the fourier terms for following year (using baseline data)
+         forecast::fourier(
+           ## only keep the rows before cut-off
+           filter(mini_data, 
+                  epiweek <= cv_cut_off) %>%  
+                select(epiweek, total),
+           ## include one set of sin cos terms 
+           K = 1, 
+           ## predict 52 weeks ahead
+           h = weeks_ahead
+           )
+         )
+       )
+      
+      # split data for fitting and prediction
+      dat <- mini_data %>% 
+         group_by(epiweek <= cv_cut_off) %>%
+         group_split()
+      
+      ## define the model you want to fit (negative binomial) 
+      model <- glm_nb_model(
+       ## set number of cases as outcome of interest
+       total ~
+         ## use epiweek to account for the trend
+         epiweek +
+         ## use the fourier terms to account for seasonality
+         fourier +
+         ## include the population as an offset (to make)
+         offset(log(population))
+      )
+      
+      # define which data to use for fitting and which for predicting
+      fitting_data <- pluck(dat, 2)
+      pred_data <- pluck(dat, 1)
+      
+      # fit model 
+      fitted_model <- trending::fit(model, fitting_data)
+      
+      ## Need to change population to be 1 for prediction (this way returns rate)
+      pred_data <- pred_data %>%
+        mutate(population = 1)
+       
+      # forecast with data want to predict with 
+      forecasts <- fitted_model %>% 
+       predict(pred_data, simulate_pi = FALSE) %>% 
+       ## only keep the week and the forecast estimate
+       select(epiweek, estimate)
+      
       }
       )
     
@@ -2052,10 +1976,10 @@ purrr::map(
       ## MAPE: Mean absolute percent error
     model_metrics <- bind_rows(
       ## in your forcasted dataset compare the observed to the predicted
-      rmse(forecasts, rate_int, fitted), 
-      mae( forecasts, rate_int, fitted),
-      mase(forecasts, rate_int, fitted),
-      mape(forecasts, rate_int, fitted),
+      rmse(forecasts, rate_int, estimate), 
+      mae( forecasts, rate_int, estimate),
+      mase(forecasts, rate_int, estimate),
+      mape(forecasts, rate_int, estimate),
       ) %>% 
       ## only keep the metric type and its output
       select(Metric  = .metric, 
@@ -2106,9 +2030,12 @@ https://twitter.com/ucfagls/status/1281655700163194881
 ```{r aberration_methods, eval = (include_tsa * include_aberration) == 1}
 
 for (i in projects) {
+  
   ## define surveillance time series object
   ## subset testing cases to the project being run 
-  lrti_sts <- sts(observed = lrti_cases$rate_int[which(lrti_cases$project == i)],
+  lrti_sts <- sts(observed = lrti_cases$rate_int[which(lrti_cases$project == i & 
+                                                   ## have to drop the added empty rows
+                                                   !is.na(lrti_cases$rate_int))],
                   # population = matrix(lrti_cases$population[which(lrti_cases$project == i)]),
                   start = c(
                     ## subset to only keep the year from start_date 
@@ -2170,9 +2097,11 @@ for (i in projects) {
   ## apply the glrnb method
   glrnbmethod <- glrnb(lrti_sts, control = ctrl, verbose = FALSE)
 
-    ## add glrnb threshold to dataset
-  lrti_cases[which(lrti_cases$project == i &
-                        lrti_cases$epiweek >= surveillance_date),
+  ## add glrnb threshold to dataset
+  observed[which(observed$project == i &
+                        observed$epiweek >= surveillance_date & 
+                     ## have to drop the added empty rows
+                     !is.na(observed$rate_int)),
                 "threshold"] <- glrnbmethod@upperbound
   
   
@@ -2196,7 +2125,7 @@ unit_lable <- if_else(admissions_based,
                       "LRTI (n/10,000 discharges)")
 
 ## plot cases and fits with confidence intervals
-base_plot <- ggplot(lrti_cases, aes(x = as.Date(epiweek))) +
+base_plot <- ggplot(observed, aes(x = as.Date(epiweek))) +
   ## plot for each project row-wise
   facet_grid(project ~ .) +
   
@@ -2205,24 +2134,21 @@ base_plot <- ggplot(lrti_cases, aes(x = as.Date(epiweek))) +
   
   ## plot in points for the observed rates - colour by whether is above PI
   geom_point(aes(y = rate_int, 
-                 colour = if_else(rate_int > CI99_UL, "Excess", "Observed"), 
-                 size = if_else(rate_int > CI99_UL, "trigger", "normal"))) + 
+                 colour = if_else(rate_int > upper_pi, "Excess", "Observed"), 
+                 size = if_else(rate_int > upper_pi, "trigger", "normal"))) + 
   
   ## plot 95% prediction intervals as a ribbon - alpha sets transparency
-  geom_ribbon(aes(ymin = CI95_LL, ymax = CI95_UL, alpha = "95% PI"), fill = "grey60") +
-  ## plot 99% prediction intervals as a ribbon - alpha sets transparency
-  geom_ribbon(aes(ymin = CI99_LL, ymax = CI99_UL, alpha = "99% PI"), fill = "grey60") +
+  geom_ribbon(aes(ymin = lower_pi, ymax = upper_pi, alpha = "95% PI"), fill = "grey60") +
 
   ## plot modelled values as a line
-  geom_line(aes(y = fitted, colour = "Fitted")) +
+  geom_line(aes(y = estimate, colour = "Fitted")) +
   ## set the colours for defined parts (match names to colours)
   scale_colour_manual(values = c("Observed" = "black",
                                  "Fitted" = "blue",
                                  "Excess" = "red", 
                                  "Alert threshold" = "orange")) +
   ## define how see-through parts are (match names to alpha)
-  scale_alpha_manual(values = c("95% PI" = 0.4,
-                                "99% PI" = 0.2)) +
+  scale_alpha_manual(values = c("95% PI" = 0.4)) +
   
   scale_size_manual(values = c("trigger" = 2, 
                     "normal" = NA_real_),
