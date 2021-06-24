@@ -1819,8 +1819,6 @@ residuals with constant variance and normally distributed residuals.
 
 ```{r forecast_tsa_validation, eval = FALSE, include = FALSE}
 
-## [TODO: FIX] - numbers dont always come out right
-
 ## Cross validation: predicting week(s) ahead based on sliding window
 
 ## expand your data by rolling over in 4 week windows (before + after) 
@@ -2220,8 +2218,8 @@ deaths <- deaths %>%
          population = patients / 10000
          )
 
-## to check what values have been imputed compared to the original [TODO: FIX]
-# imputeTS::plotNA.imputations(deaths$rate, deaths$rate_int)
+## to check what values have been imputed compared to the original
+# imputeTS::ggplot_na_imputations(deaths$rate, deaths$rate_int)
 
 
 ## only keep overall deaths 
