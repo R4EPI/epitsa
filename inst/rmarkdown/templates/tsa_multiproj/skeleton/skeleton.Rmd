@@ -58,7 +58,6 @@ knitr::opts_chunk$set(echo = FALSE,      # hide all code chunks in output
                       tab.cap.sep = ": "
                       )
 
-##TODO delete unused packages
 
 ## Installing required packages for this template
 required_packages <- c("here",          # find your files
@@ -100,7 +99,7 @@ git_packages <- c("epitsa"  # for msf data tools and tsa utilities
                   )
 for (pkg in git_packages) {
 
-  ## install packages if not already present from approrpriate repo
+  ## install packages if not already present from appropriate repo
   if (!pkg %in% rownames(installed.packages())) {
 
     if (pkg == "epitsa") {
@@ -115,16 +114,6 @@ for (pkg in git_packages) {
 
 ```
 
-
-
-
-```{r country_specific}
-
-## TODO fix so that defining a z not necessary lower down?
-
-## specific country
-z <- "DRC North Kivu"
-```
 
 <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 /// control_chunk \\\
@@ -148,12 +137,19 @@ include_tsa <- TRUE
 ## whether want to include aberration methods (only relevant for TSA)
 include_aberration <- FALSE
 
+## which aberration method to use (options are: "farrington", "glrnb")
+aberration_method <- "glrnb"
+
 ## define which wards are included by country 
 ## "Medical" is excluding ITFC + maternity in IPD ("Medical extension" includes)
 medical_wards <- if_else(z %in% c("Bangladesh", "South Sudan", "Nigeria", 
                                   "Afghanistan", "DRC North Kivu"), 
                          "Medical", 
                          "Medical extension")
+
+## If only want to run a specific country: uncomment beloww and define
+# z <- "DRC North Kivu"
+
 ```
 
 
@@ -211,13 +207,8 @@ country folder.
 
 ```{r country_folders}
 
-##TODO delete static filepath (and uncomment below)
-
-file_path <- paste0("C:\\Users\\Spina\\Desktop\\TSA_covid19\\Data\\Processed\\", z)
-
-
 ## define the filepath
-# file_path <- here::here("Data", "Processed", z)
+file_path <- here::here("Data", "Processed", z)
 
 ```
 
@@ -2019,11 +2010,6 @@ https://twitter.com/ucfagls/status/1281655700163194881
 
 ```{r aberration_methods, eval = (include_tsa * include_aberration) == 1}
 
-## TODO: include a switch in control chunk to define method ("farrington" / "glrnb") 
-  ## then use if statement to define - apply and store in object called algo_method
-  ## then only need one line to incorporate in to observed dataframe (outside of if{})
-
-
 for (i in projects) {
   
   ## define surveillance time series object
@@ -2044,40 +2030,33 @@ for (i in projects) {
   ## (use first week available in data - otherwise SSudan fails, missing early data)
   weekrange <- surveillance_date - min(lrti_cases$epiweek[lrti_cases$project == i])
   
-  #### using the farrington algorithm 
-
-  # ## define control
-  # ctrl <- list(
-  #              ## define what time period that want threshold for (i.e. 2020)
-  #              range = which(lrti_sts@epoch > weekrange),
-  #              b = 5, ## how many years backwards for baseline
-  #              w = 2, ## rolling window size in weeks
-  #              weightsThreshold = 2.58, ## reweighting past outbreaks (improved noufaily method - original suggests 1)
-  #              ## pastWeeksNotIncluded = 3, ## use all weeks available (noufaily suggests drop 26)
-  #              trend = TRUE,
-  #              pThresholdTrend = 1, ## 0.05 normally, however 1 is advised in the improved method (i.e. always keep)
-  #              thresholdMethod = "nbPlugin",
-  #              populationOffset = TRUE
-  #              )
-  # ## apply farrington flexible method
-  # farringtonmethod <- farringtonFlexible(lrti_sts, ctrl)
-  # 
-  # ## add farrington threshold to dataset
-  # observed[which(observed$project == i &
-  #                       observed$epiweek >= surveillance_date &
-  #                    ## have to drop the added empty rows
-  #                    !is.na(observed$rate_int)),
-  #               "threshold"] <- farringtonmethod@upperbound
-  
-  
-  
-  
+  #### using the farrington algorithm
+  if (aberration_method == "farrington") {
+    
+      ## define control
+      ctrl <- list(
+               ## define what time period that want threshold for (i.e. 2020)
+               range = which(lrti_sts@epoch > weekrange),
+               b = 5, ## how many years backwards for baseline
+               w = 2, ## rolling window size in weeks
+               weightsThreshold = 2.58, ## reweighting past outbreaks (improved noufaily method - original suggests 1)
+               ## pastWeeksNotIncluded = 3, ## use all weeks available (noufaily suggests drop 26)
+               trend = TRUE,
+               pThresholdTrend = 1, ## 0.05 normally, however 1 is advised in the improved method (i.e. always keep)
+               thresholdMethod = "nbPlugin",
+               populationOffset = TRUE
+               )
+      ## apply farrington flexible method
+      detectionmethod <- farringtonFlexible(lrti_sts, ctrl)
+    
+  }
   
   ### using glrnb 
   ## set up using https://cran.r-project.org/web/packages/surveillance/vignettes/glrnb.pdf
-
-  ## define control options
-  ctrl <- list(
+  if (aberration_method == "glrnb") {
+    
+      ## define control options
+      ctrl <- list(
                ## define what time period that want threshold for (i.e. 2020)
                range = which(lrti_sts@epoch > weekrange),
                mu0 = list(S = 2,    ## number of fourier terms (harmonics) to include
@@ -2091,16 +2070,17 @@ for (i in projects) {
                ret = "cases"     ## return threshold upperbound as case counts
                )
 
-  ## apply the glrnb method
-  glrnbmethod <- glrnb(lrti_sts, control = ctrl, verbose = FALSE)
+      ## apply the glrnb method
+      detectionmethod <- glrnb(lrti_sts, control = ctrl, verbose = FALSE)
+  }
+   
 
-  ## add glrnb threshold to dataset
+  ## add outbreak threshold to dataset
   observed[which(observed$project == i &
                         observed$epiweek >= surveillance_date &
                      ## have to drop the added empty rows
                      !is.na(observed$rate_int)),
-                "threshold"] <- glrnbmethod@upperbound
-  
+                "threshold"] <- detectionmethod@upperbound
   
 }
 
@@ -2831,11 +2811,6 @@ https://twitter.com/ucfagls/status/1281655700163194881
 
 ```{r aberration_methods_deaths, eval = (include_tsa * include_aberration) == 1}
 
-## TODO: include a switch in control chunk to define method ("farrington" / "glrnb") 
-  ## then use if statement to define - apply and store in object called algo_method
-  ## then only need one line to incorporate in to observed dataframe (outside of if{})
-
-
 for (i in projects) {
   
   ## define surveillance time series object
@@ -2857,39 +2832,33 @@ for (i in projects) {
   weekrange <- surveillance_date - min(overall_deaths$epiweek[overall_deaths$project == i])
   
   #### using the farrington algorithm 
-
-  # ## define control
-  # ctrl <- list(
-  #              ## define what time period that want threshold for (i.e. 2020)
-  #              range = which(deaths_sts@epoch > weekrange),
-  #              b = 5, ## how many years backwards for baseline
-  #              w = 2, ## rolling window size in weeks
-  #              weightsThreshold = 2.58, ## reweighting past outbreaks (improved noufaily method - original suggests 1)
-  #              ## pastWeeksNotIncluded = 3, ## use all weeks available (noufaily suggests drop 26)
-  #              trend = TRUE,
-  #              pThresholdTrend = 1, ## 0.05 normally, however 1 is advised in the improved method (i.e. always keep)
-  #              thresholdMethod = "nbPlugin",
-  #              populationOffset = TRUE
-  #              )
-  # ## apply farrington flexible method
-  # farringtonmethod <- farringtonFlexible(deaths_sts, ctrl)
-  # 
-  # ## add farrington threshold to dataset
-  # observed[which(observed$project == i &
-  #                       observed$epiweek >= surveillance_date &
-  #                    ## have to drop the added empty rows
-  #                    !is.na(observed$rate_int)),
-  #               "threshold"] <- farringtonmethod@upperbound
-  
-  
-  
+  if (aberration_method == "farrington") {
+    ## define control
+    ctrl <- list(
+               ## define what time period that want threshold for (i.e. 2020)
+               range = which(deaths_sts@epoch > weekrange),
+               b = 5, ## how many years backwards for baseline
+               w = 2, ## rolling window size in weeks
+               weightsThreshold = 2.58, ## reweighting past outbreaks (improved noufaily method - original suggests 1)
+               ## pastWeeksNotIncluded = 3, ## use all weeks available (noufaily suggests drop 26)
+               trend = TRUE,
+               pThresholdTrend = 1, ## 0.05 normally, however 1 is advised in the improved method (i.e. always keep)
+               thresholdMethod = "nbPlugin",
+               populationOffset = TRUE
+               )
+    
+    ## apply farrington flexible method
+    detectionmethod <- farringtonFlexible(deaths_sts, ctrl)
+    
+  }
   
   
   ### using glrnb 
   ## set up using https://cran.r-project.org/web/packages/surveillance/vignettes/glrnb.pdf
-
-  ## define control options
-  ctrl <- list(
+  if (aberration_method == "glrnb") {
+    
+    ## define control options
+    ctrl <- list(
                ## define what time period that want threshold for (i.e. 2020)
                range = which(deaths_sts@epoch > weekrange),
                mu0 = list(S = 2,    ## number of fourier terms (harmonics) to include
@@ -2903,16 +2872,16 @@ for (i in projects) {
                ret = "cases"     ## return threshold upperbound as case counts
                )
 
-  ## apply the glrnb method
-  glrnbmethod <- glrnb(deaths_sts, control = ctrl, verbose = FALSE)
-
-  ## add glrnb threshold to dataset
+    ## apply the glrnb method
+    detectionmethod <- glrnb(deaths_sts, control = ctrl, verbose = FALSE)
+  }
+  
+  ## add outbreak threshold to dataset
   observed[which(observed$project == i &
                         observed$epiweek >= surveillance_date &
                      ## have to drop the added empty rows
                      !is.na(observed$rate_int)),
-                "threshold"] <- glrnbmethod@upperbound
-  
+                "threshold"] <- detectionmethod@upperbound
   
 }
 
