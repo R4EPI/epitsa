@@ -3136,61 +3136,64 @@ patient_counts$fourier <- purrr::map(
       filter(patient_counts, project == i) %>% 
         select(epiweek, total),
       ## choose number of sincos terms to include
-      2
+      K = 2
     )
   }) %>%
   ## bind together a list (bind_rows doesnt work because cols not named)
   do.call(rbind, .)
 
 
-## fit a negative binomial model using data from 2019 and earlier 
-## include trend as well as seasonal fourier terms
-nbreg <- patient_counts %>% 
+## split data for fitting by project
+dat <- patient_counts %>% 
   as_tibble() %>% 
   group_by(project) %>% 
-  nest() %>% 
-  mutate(fit = purrr::map(data, 
-                          ~ MASS::glm.nb(total ~ linear + 
-                                           fourier + intervention + time_post+ 
-                                           offset(log(population)), 
-                                       data = .)))
-                          
+  nest()
+
+
+## define the model you want to fit (negative binomial) 
+model <- glm_nb_model(
+  ## set number of cases as outcome of interest
+  total ~
+    ## use epiweek to account for the trend
+    epiweek +
+    ## use the furier terms to account for seasonality
+    fourier + 
+    ## add in whether in the pre- or post-period 
+    intervention + 
+    ## add in the time post intervention 
+    time_post + 
+    ## include the population as an offset (to make)
+    offset(log(population))
+)
+
+
+## fit the baseline model 
+dat <- dat %>% 
+  mutate(
+    ## for base line data fit the model defined above for each projects
+    fit = purrr::map(data,
+                     ~fit(model, .x)
+    ))
 
 ## Need to change population to be 1 for prediction (this way returns rate)
-nbreg <- nbreg %>% 
+dat <- dat %>% 
   ## within the nested list loop over the data frames for each project
   mutate(data = purrr::map(data, 
                            ## within each dataframe, change population to be 1
                            ~mutate(.x, 
                                    population = 1)))
 
-## use the regression to forecast and calculate appropriate prediction intervals
-patient_counts <- nbreg %>% 
-  mutate(
-       ## Use predict to get fitted values for rate 
-       fitted = purrr::map2(.x = fit, .y = data, 
-                    .f = ~predict(.x, .y, type = "response")), 
-       ## calculate lower and upper PI (at 95% alpha = 0.5) [taken from Dirk Schumacher in {Trendbreaker}]
-       CI95_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                      .f = ~qnbinom(0.5 / 2, mu = .x, size = .y)), 
-       CI95_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                             .f = ~qnbinom(1 - 0.5 / 2, mu = .x, size = .y)),
-       ## calculate lower and upper PI (at 99% alpha = 0.1)
-       CI99_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                      .f = ~qnbinom(0.1 / 2, mu = .x, size = .y)), 
-       CI99_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                             .f = ~qnbinom(1 - 0.1 / 2, mu = .x, size = .y))
-       ) %>% 
-    ## keep data and newly created columns 
-    select(project, data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL) %>% 
-    ## pull back together in to one data frame 
-    unnest(c(data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL))
 
-## set population back to what it was 
-patient_counts <- patient_counts %>% 
-  mutate(## create a population per 10,000 variable 
-         population = beds / 10000
-         )
+## calculate confidence intervals and prediction intervals for plotting 
+observed <- dat %>% 
+  mutate(predicted = purrr::map(project, 
+                               ~predict(
+                                 dat$fit[dat$project == .x][[1]],
+                                 dat$data[dat$project == .x][[1]],
+                                 simulate_pi = FALSE))) %>% 
+  ## pull projects in to single data frame
+  select(predicted) %>% 
+  unnest(cols = c(predicted))
 
 ```
 
@@ -3204,32 +3207,44 @@ This chunk creates a table from the regression run above
 ```{r overall_patient_impact_table, eval = include_tsa}
 
 # exponentiate results for IRRs and then pull bits out to get percentage change
-nbreg %>% 
-  ## use broom to exponentiate terms and get confidence interval 
-  mutate(outputs = purrr::map(.x = fit, 
-                              .f = ~broom::tidy(.x, 
-                                                exponentiate = TRUE,
-                                                conf.int = TRUE))) %>% 
+dat %>% 
+  ## use broom to exponentiate terms and get confidence interval for each project
+  mutate(outputs = purrr::map(fit, 
+                              function(i) {
+                                ## extract original negative binomial regression
+                                get_model(i) %>% 
+                                  ## get a tidy dataframe of results
+                                  broom::tidy(exponentiate = TRUE, 
+                                              conf.int = TRUE)
+                                }
+                              )) %>% 
   ## only keep project and the data frame with exponentiated results
-  select(project, outputs) %>% 
+  select(project, outputs) %>%
   ## pull out of list in to a dataframe 
   unnest(cols = c(outputs)) %>% 
   ## only keep the intervention value 
   filter(term == "intervention") %>% 
   ## change the IRR to percentage change for estimate and CIs 
-  mutate_at(vars(estimate, conf.low, conf.high), .f = function(i) 100 * (i - 1)) %>% 
+  mutate(
+    ## for each of the columns of interest - create a new column
+    across(
+      all_of(c("estimate", "conf.low", "conf.high")), 
+      ## apply the formula to calculate percentage change
+            .f = function(i) 100 * (i - 1), 
+      ## add a suffix to new column names with "_perc"
+      .names = "{.col}_perc")
+    ) %>% 
   ## only keep (and rename) certain columns 
-  select(Project = project, 
-         "Percentage change" = estimate, 
-         "95%CI low" = conf.low, 
-         "95%CI high" = conf.high, 
+  select("Percentage change" = estimate_perc, 
+         "95%CI low" = conf.low_perc, 
+         "95%CI high" = conf.high_perc,
          "p-value" = p.value) %>% 
   ## show as a formatted table in the output
   flextable::flextable() %>% 
   ## select number of digits want in different columns 
-  flextable::colformat_num(j = c("Percentage change", "95%CI low", "95%CI high"),
+  flextable::colformat_double(j = c("Percentage change", "95%CI low", "95%CI high"),
                            digits = 1) %>% 
-  flextable::colformat_num(j = c("p-value"), digits = 3) %>% 
+  flextable::colformat_double(j = c("p-value"), digits = 3) %>% 
   autofit() %>% 
   set_caption("Percentage change in patient rates")
 
@@ -3249,6 +3264,7 @@ This chunk creates a plot from the regression run above
 
 ## define the height that want to use for text labels
 height <- patient_counts %>% 
+  as_tibble() %>% 
   ## for each project
   group_by(project) %>% 
   ## find the highest peak out of all projects
@@ -3286,23 +3302,19 @@ ggplot() +
   
 
   ## plot 95% prediction intervals as a ribbon - alpha sets transparency
-  geom_ribbon(data = patient_counts, 
+  geom_ribbon(data = observed, 
               aes(x = as.Date(epiweek), group = intervention, 
-                  ymin = CI95_LL, ymax = CI95_UL, alpha = "95% PI"), fill = "grey60") +
-  ## plot 99% prediction intervals as a ribbon - alpha sets transparency
-  geom_ribbon(data = patient_counts, 
-              aes(x = as.Date(epiweek), group = intervention, 
-                  ymin = CI99_LL, ymax = CI99_UL, alpha = "99% PI"), fill = "grey60") +
+                  ymin = lower_pi, ymax = upper_pi, alpha = "95% PI"), fill = "grey60") +
   
   ## plot modelled values as a line
-  geom_line(data = patient_counts, 
+  geom_line(data = observed, 
             aes(x = as.Date(epiweek), group = intervention, 
-                y = fitted, colour = "Fitted")) +
+                y = estimate, colour = "Fitted")) +
   ## set the colours for defined parts (match names to colours)
   scale_colour_manual(values = c("Observed" = "black",
                                  "Fitted" = "blue")) +
-  scale_alpha_manual(values = c("95% PI" = 0.4,
-                                "99% PI" = 0.2)) +
+  scale_alpha_manual(values = c("95% PI" = 0.4)) +
+  
   ## reverse the order of the legend
   guides(colour = guide_legend(reverse = TRUE)) +
   ## make y and x axes meet at the origin (x = 0, y = 0)
@@ -3395,9 +3407,6 @@ if (z == "Pakistan") {
 
 
 
-
-
-
 ## define fourier terms (sincos) 
 cases$fourier <- purrr::map(
     ## for each of the projects
@@ -3419,55 +3428,59 @@ cases$fourier <- purrr::map(
   do.call(rbind, .)
 
 
-## fit a negative binomial model using data from 2019 and earlier 
-## include trend as well as seasonal fourier terms
-nbreg <- cases %>% 
+## split data for fitting by project
+dat <- cases %>% 
   as_tibble() %>% 
   group_by(project, disease) %>% 
-  nest() %>% 
-  mutate(fit = purrr::map(data, 
-                          ~ MASS::glm.nb(total ~ linear + fourier + 
-                                           intervention + time_post + 
-                                           offset(log(population)), 
-                                       data = .)))
-                          
+  nest()
+
+
+## define the model you want to fit (negative binomial) 
+model <- glm_nb_model(
+  ## set number of cases as outcome of interest
+  total ~
+    ## use epiweek to account for the trend
+    epiweek +
+    ## use the furier terms to account for seasonality
+    fourier + 
+    ## add in whether in the pre- or post-period 
+    intervention + 
+    ## add in the time post intervention 
+    time_post + 
+    ## include the population as an offset (to make)
+    offset(log(population))
+)
+
+
+## fit the baseline model 
+dat <- dat %>% 
+  mutate(
+    ## for base line data fit the model defined above for each projects
+    fit = purrr::map(data,
+                     ~fit(model, .x)
+    ))
 
 ## Need to change population to be 1 for prediction (this way returns rate)
-nbreg <- nbreg %>% 
+dat <- dat %>% 
   ## within the nested list loop over the data frames for each project
   mutate(data = purrr::map(data, 
                            ## within each dataframe, change population to be 1
                            ~mutate(.x, 
                                    population = 1)))
 
-## use the regression to forecast and calculate appropriate prediction intervals
-cases <- nbreg %>% 
-  mutate(
-       ## Use predict to get fitted values for rate 
-       fitted = purrr::map2(.x = fit, .y = data, 
-                    .f = ~predict(.x, .y, type = "response")), 
-       ## calculate lower and upper PI (at 95% alpha = 0.5) [taken from Dirk Schumacher in {Trendbreaker}]
-       CI95_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                      .f = ~qnbinom(0.5 / 2, mu = .x, size = .y)), 
-       CI95_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                             .f = ~qnbinom(1 - 0.5 / 2, mu = .x, size = .y)),
-       ## calculate lower and upper PI (at 99% alpha = 0.1)
-       CI99_LL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                      .f = ~qnbinom(0.1 / 2, mu = .x, size = .y)), 
-       CI99_UL = purrr::map2(.x = fitted, .y = fit[[1]]$theta, 
-                             .f = ~qnbinom(1 - 0.1 / 2, mu = .x, size = .y))
-       ) %>% 
-    ## keep data and newly created columns 
-    select(project, disease, data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL) %>% 
-    ## pull back together in to one data frame 
-    unnest(c(data, fitted, CI95_LL, CI95_UL, CI99_LL, CI99_UL))
 
-
-## set population back to what it was 
-cases <- cases %>% 
-  mutate(## create a population per 10,000 variable 
-         population = patients / 10000
-         )
+## calculate confidence intervals and prediction intervals for plotting 
+observed <- dat %>% 
+  mutate(predicted = purrr::map2(.x = project, .y = disease, 
+                               ~predict(
+                                 dat$fit[dat$project == .x & 
+                                           dat$disease == .y][[1]],
+                                 dat$data[dat$project == .x & 
+                                           dat$disease == .y][[1]],
+                                 simulate_pi = FALSE))) %>% 
+  ## pull projects in to single data frame
+  select(predicted) %>% 
+  unnest(cols = c(predicted))
 ```
 
 
@@ -3481,20 +3494,33 @@ This chunk creates a table from the regression run above
 ```{r disease_specific_impact_table, eval = include_tsa}
 
 # exponentiate results for IRRs and then pull bits out to get percentage change
-nbreg %>% 
-  ## use broom to exponentiate terms and get confidence interval 
-  mutate(outputs = purrr::map(.x = fit, 
-                              .f = ~broom::tidy(.x, 
-                                                exponentiate = TRUE,
-                                                conf.int = TRUE))) %>% 
+dat %>% 
+  ## use broom to exponentiate terms and get confidence interval for each project
+  mutate(outputs = purrr::map(fit, 
+                              function(i) {
+                                ## extract original negative binomial regression
+                                get_model(i) %>% 
+                                  ## get a tidy dataframe of results
+                                  broom::tidy(exponentiate = TRUE, 
+                                              conf.int = TRUE)
+                                }
+                              )) %>% 
   ## only keep project and the data frame with exponentiated results
-  select(project, disease, outputs) %>% 
+  select(project, disease, outputs) %>%
   ## pull out of list in to a dataframe 
   unnest(cols = c(outputs)) %>% 
   ## only keep the intervention value 
   filter(term == "intervention") %>% 
   ## change the IRR to percentage change for estimate and CIs 
-  mutate_at(vars(estimate, conf.low, conf.high), .f = function(i) 100 * (i - 1)) %>% 
+  mutate(
+    ## for each of the columns of interest - create a new column
+    across(
+      all_of(c("estimate", "conf.low", "conf.high")), 
+      ## apply the formula to calculate percentage change
+            .f = function(i) 100 * (i - 1), 
+      ## add a suffix to new column names with "_perc"
+      .names = "{.col}_perc")
+    ) %>%  
   ## only keep (and rename) certain columns 
   select(Project = project, 
          Disease = disease, 
@@ -3505,9 +3531,9 @@ nbreg %>%
   ## show as a formatted table in the output
   flextable::flextable() %>% 
   ## select number of digits want in different columns 
-  flextable::colformat_num(j = c("Percentage change", "95%CI low", "95%CI high"),
+  flextable::colformat_double(j = c("Percentage change", "95%CI low", "95%CI high"),
                            digits = 1) %>% 
-  flextable::colformat_num(j = c("p-value"), digits = 3) %>% 
+  flextable::colformat_double(j = c("p-value"), digits = 3) %>% 
   autofit() %>% 
   set_caption("Percentage change in disease specific rates")
 
@@ -3532,22 +3558,31 @@ unit_lable <- if_else(admissions_based,
 ## walk is the same as map but does it quietly (doesnt show list number in output)
 purrr::walk(projects, ~ print(
     ## plot cases and fits with confidence intervals
-    ggplot(filter(cases, project == .x), aes(x = as.Date(epiweek), group = intervention)) +
+    ggplot(data = filter(cases, project == .x), 
+           aes(x = as.Date(epiweek), group = intervention)) +
       ## plot for each project row-wise
       facet_grid(project + disease ~ ., scales = "free_y") +
-      ## plot 95% prediction intervals as a ribbon - alpha sets transparency
-      geom_ribbon(aes(ymin = CI95_LL, ymax = CI95_UL, alpha = "95% PI"), fill = "grey69") +
-      ## plot 99% prediction intervals as a ribbon - alpha sets transparency
-      geom_ribbon(aes(ymin = CI99_LL, ymax = CI99_UL, alpha = "99% PI"), fill = "grey60") +
+      
       ## plot interpolated observed values as line - label observed (colour defined later)
-      geom_line(aes(y = rate_int, colour = "Observed")) +
+      geom_line(data = filter(cases, project == .x), 
+                aes(x = as.Date(epiweek), group = intervention, 
+                    y = rate_int, colour = "Observed")) +
+      
+      ## plot 95% prediction intervals as a ribbon - alpha sets transparency
+      geom_ribbon(data = filter(observed, project == .x), 
+                  aes(x = as.Date(epiweek), group = intervention, 
+                  ymin = lower_pi, ymax = upper_pi, alpha = "95% PI"), fill = "grey60") +
+  
       ## plot modelled values as a line
-      geom_line(aes(y = fitted, colour = "Fitted")) +
+      geom_line(data = filter(observed, project == .x), 
+                aes(x = as.Date(epiweek), group = intervention, 
+                    y = estimate, colour = "Fitted")) +
+      
       ## set the colours for defined parts (match names to colours)
-      scale_colour_manual(values = c("Observed" = "grey60",
+      scale_colour_manual(values = c("Observed" = "black",
                                      "Fitted" = "blue")) +
-      scale_alpha_manual(values = c("95% PI" = 0.4,
-                                    "99% PI" = 0.2)) +
+      scale_alpha_manual(values = c("95% PI" = 0.4)) +
+      
       ## reverse the order of the legend
       guides(colour = guide_legend(reverse = TRUE)) +
       ## make y and x axes meet at the origin (x = 0, y = 0)
